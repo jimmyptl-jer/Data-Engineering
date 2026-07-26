@@ -1,0 +1,10 @@
+# Dev dependencies — install with: pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Testing
+pytest>=8.0
+pytest-cov>=6.0
+
+# Linting & Formatting
+flake8>=7.0
+black>=25.0
