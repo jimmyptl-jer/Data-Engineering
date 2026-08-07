@@ -61,6 +61,10 @@ from pyspark.sql.types import (
 logger = logging.getLogger(__name__)
 
 
+# ==============================================================================
+# STOCK DATA TRANSFORMER CLASS
+# ==============================================================================
+
 class StockDataTransformer:
     """
     Transforms raw Bronze stock DataFrames into clean, typed, validated, and enriched Silver DataFrames.
@@ -75,9 +79,9 @@ class StockDataTransformer:
         """
         self.spark = spark
 
-    # ============================================================
-    # WEEKLY TIME SERIES (kept for future architecture expansion)
-    # ============================================================
+    # ==========================================================================
+    # 1. WEEKLY TIME SERIES TRANSFORMATION
+    # ==========================================================================
 
     def transform_weekly_timeseries(
         self,
@@ -98,14 +102,18 @@ class StockDataTransformer:
         logger.info("[TRANSFORM][WEEKLY_START] Starting weekly time-series transformation.")
 
         try:
+            # ------------------------------------------------------------------
             # Step 1: Flatten nested JSON structure
+            # ------------------------------------------------------------------
             raw_df = data_df.select(
                 col("`Meta Data`.`2. Symbol`").alias("symbol"),
                 col("`Meta Data`.`3. Last Refreshed`").alias("last_refreshed"),
                 explode(col("`Weekly Time Series`")).alias("week_date", "weekly_data"),
             )
 
+            # ------------------------------------------------------------------
             # Step 2: Select and alias OHLCV fields
+            # ------------------------------------------------------------------
             stock_df = raw_df.select(
                 col("symbol"),
                 col("last_refreshed"),
@@ -117,10 +125,18 @@ class StockDataTransformer:
                 col("weekly_data.`5. volume`").alias("volume"),
             )
 
-            # Step 3: Trim whitespace and uppercase ticker symbol
+            # ------------------------------------------------------------------
+            # Step 3: Trim whitespace, uppercase symbol & normalize fake nulls
+            # ------------------------------------------------------------------
             string_columns = [
-                "symbol", "last_refreshed", "week_date",
-                "open", "high", "low", "close", "volume",
+                "symbol",
+                "last_refreshed",
+                "week_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
             ]
 
             for column_name in string_columns:
@@ -128,7 +144,6 @@ class StockDataTransformer:
 
             stock_df = stock_df.withColumn("symbol", upper(col("symbol")))
 
-            # Normalize string placeholders ("n/a", "none", "-", "null") to Spark NULL
             fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
             for column_name in string_columns:
@@ -140,7 +155,9 @@ class StockDataTransformer:
                     ).otherwise(col(column_name)),
                 )
 
+            # ------------------------------------------------------------------
             # Step 4: Cast strings to explicit data types
+            # ------------------------------------------------------------------
             stock_df = (
                 stock_df
                 .withColumn("week_date", to_date(col("week_date"), "yyyy-MM-dd"))
@@ -152,7 +169,9 @@ class StockDataTransformer:
                 .withColumn("volume", col("volume").cast("long"))
             )
 
-            # Step 5: Data Quality Validation
+            # ------------------------------------------------------------------
+            # Step 5: Data Quality Validation Assertions
+            # ------------------------------------------------------------------
             stock_df = stock_df.withColumn(
                 "validation_status",
                 when(col("symbol").isNull(), "INVALID")
@@ -172,7 +191,9 @@ class StockDataTransformer:
                 .otherwise("VALID"),
             )
 
-            # Step 6: Validation Reason Tagging
+            # ------------------------------------------------------------------
+            # Step 6: Validation Reason Tagging for Quarantine Audit
+            # ------------------------------------------------------------------
             stock_df = stock_df.withColumn(
                 "validation_reason",
                 when(col("symbol").isNull(), "Missing symbol")
@@ -192,16 +213,22 @@ class StockDataTransformer:
                 .otherwise(None),
             )
 
-            # Step 7: Filter VALID Records
+            # ------------------------------------------------------------------
+            # Step 7: Filter VALID Records for Silver Layer
+            # ------------------------------------------------------------------
             valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
             invalid_record_count = stock_df.filter(col("validation_status") == "INVALID").count()
-            logger.info("[TRANSFORM][WEEKLY] Found %d invalid records.", invalid_record_count)
+            logger.info("[TRANSFORM][WEEKLY] Quarantined invalid records count: %d.", invalid_record_count)
 
+            # ------------------------------------------------------------------
             # Step 8: Deduplicate on (symbol, week_date)
+            # ------------------------------------------------------------------
             valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "week_date"])
 
-            # Step 9: Round numeric columns
+            # ------------------------------------------------------------------
+            # Step 9: Round numeric price fields
+            # ------------------------------------------------------------------
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("open", round(col("open"), 2))
@@ -210,7 +237,9 @@ class StockDataTransformer:
                 .withColumn("close", round(col("close"), 2))
             )
 
-            # Step 10: Derived Metrics & Timestamps
+            # ------------------------------------------------------------------
+            # Step 10: Metric Enrichment & Partition Metadata
+            # ------------------------------------------------------------------
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("weekly_change", round(col("close") - col("open"), 2))
@@ -231,14 +260,26 @@ class StockDataTransformer:
                 .withColumnRenamed("last_refreshed", "last_refreshed_date")
             )
 
-            # Step 11: Final Selection and Sorting
+            # ------------------------------------------------------------------
+            # Step 11: Final Selection & Ordering
+            # ------------------------------------------------------------------
             valid_stock_df = valid_stock_df.select(
-                "symbol", "week_date",
-                "open", "high", "low", "close", "volume",
-                "weekly_change", "weekly_change_percentage", "market_movement",
-                "year", "month", "week_number",
+                "symbol",
+                "week_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "weekly_change",
+                "weekly_change_percentage",
+                "market_movement",
+                "year",
+                "month",
+                "week_number",
                 "last_refreshed_date",
-                "validation_status", "validation_reason",
+                "validation_status",
+                "validation_reason",
                 "processed_at",
             )
 
@@ -253,16 +294,16 @@ class StockDataTransformer:
                 logger.debug("[TRANSFORM][WEEKLY] Sample data:")
                 valid_stock_df.show(10, truncate=False)
 
-            logger.info("[TRANSFORM][WEEKLY_OK] Weekly time-series transformation completed.")
+            logger.info("[TRANSFORM][WEEKLY_OK] Weekly time-series transformation completed successfully.")
             return valid_stock_df
 
         except Exception as e:
             logger.exception("[TRANSFORM][WEEKLY_FAIL] Error transforming weekly data: %s", e)
             raise
 
-    # ============================================================
-    # DAILY TIME SERIES TRANSFORMATION
-    # ============================================================
+    # ==========================================================================
+    # 2. DAILY TIME SERIES TRANSFORMATION
+    # ==========================================================================
 
     def silver_transform_daily_timeseries(
         self,
@@ -303,7 +344,9 @@ class StockDataTransformer:
         logger.info("[TRANSFORM][DAILY_START] Starting daily time-series transformation pipeline.")
 
         try:
-            # 1. Flatten nested JSON
+            # ------------------------------------------------------------------
+            # Step 1: Flatten nested JSON structure
+            # ------------------------------------------------------------------
             logger.info("[TRANSFORM][DAILY_STEP1] Flattening nested JSON structure.")
             raw_df = data_df.select(
                 col("`Meta Data`.`2. Symbol`").alias("symbol"),
@@ -311,7 +354,9 @@ class StockDataTransformer:
                 explode(col("Time Series (Daily)")).alias("day_date", "daily_data"),
             )
 
-            # 2. Select and alias OHLCV columns
+            # ------------------------------------------------------------------
+            # Step 2: Select and alias OHLCV fields
+            # ------------------------------------------------------------------
             logger.info("[TRANSFORM][DAILY_STEP2] Selecting and aliasing OHLCV fields.")
             stock_df = raw_df.select(
                 col("symbol"),
@@ -324,7 +369,9 @@ class StockDataTransformer:
                 col("daily_data.`5. volume`").alias("volume"),
             )
 
-            # 3. Watermark Filter (Incremental Load Optimization)
+            # ------------------------------------------------------------------
+            # Step 3: Watermark Filter (Incremental Load Optimization)
+            # ------------------------------------------------------------------
             if watermark_value is not None:
                 logger.info(
                     "[TRANSFORM][DAILY_WATERMARK] Applying date watermark filter: day_date > '%s'.",
@@ -334,10 +381,18 @@ class StockDataTransformer:
             else:
                 logger.info("[TRANSFORM][DAILY_WATERMARK] No watermark provided — executing full historical load.")
 
-            # 4. String Cleaning & Fake Null Normalization
+            # ------------------------------------------------------------------
+            # Step 4: String Cleaning & Fake Null Normalization
+            # ------------------------------------------------------------------
             string_columns = [
-                "symbol", "last_refreshed", "day_date",
-                "open", "high", "low", "close", "volume",
+                "symbol",
+                "last_refreshed",
+                "day_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
             ]
 
             for column_name in string_columns:
@@ -356,7 +411,9 @@ class StockDataTransformer:
                     ).otherwise(col(column_name)),
                 )
 
-            # 5. Data Type Conversion
+            # ------------------------------------------------------------------
+            # Step 5: Data Type Conversion
+            # ------------------------------------------------------------------
             stock_df = (
                 stock_df
                 .withColumn("day_date", to_date(col("day_date"), "yyyy-MM-dd"))
@@ -368,7 +425,9 @@ class StockDataTransformer:
                 .withColumn("volume", col("volume").cast("long"))
             )
 
-            # 6. Data Quality Validation (Quarantine Pattern)
+            # ------------------------------------------------------------------
+            # Step 6: Data Quality Validation (Quarantine Pattern)
+            # ------------------------------------------------------------------
             stock_df = stock_df.withColumn(
                 "validation_status",
                 when(col("symbol").isNull(), "INVALID")
@@ -408,16 +467,22 @@ class StockDataTransformer:
                 .otherwise(None),
             )
 
-            # 7. Quarantine Filter: Keep VALID rows for Silver
+            # ------------------------------------------------------------------
+            # Step 7: Quarantine Filter — Keep VALID rows for Silver
+            # ------------------------------------------------------------------
             valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
             invalid_record_count = stock_df.filter(col("validation_status") == "INVALID").count()
             logger.info("[TRANSFORM][DAILY_DQ] Data Quality check completed. Quarantined invalid records: %d", invalid_record_count)
 
-            # 8. Deduplicate on (symbol, day_date)
+            # ------------------------------------------------------------------
+            # Step 8: Deduplicate on (symbol, day_date)
+            # ------------------------------------------------------------------
             valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "day_date"])
 
-            # 9. Round Price Fields
+            # ------------------------------------------------------------------
+            # Step 9: Round Price Fields
+            # ------------------------------------------------------------------
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("open", round(col("open"), 2))
@@ -426,7 +491,9 @@ class StockDataTransformer:
                 .withColumn("close", round(col("close"), 2))
             )
 
-            # 10. Metric Enrichment (daily_change, daily_change_percentage, market_movement)
+            # ------------------------------------------------------------------
+            # Step 10: Metric Enrichment (daily_change, percentage, market_movement)
+            # ------------------------------------------------------------------
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("daily_change", round(col("close") - col("open"), 2))
@@ -448,7 +515,9 @@ class StockDataTransformer:
                 logger.debug("[TRANSFORM][DAILY] Valid data schema:")
                 valid_stock_df.printSchema()
 
-            # 11. Rolling Aggregations: 30-Day Average Open & Close
+            # ------------------------------------------------------------------
+            # Step 11: Rolling Aggregations — 30-Day Average Open & Close
+            # ------------------------------------------------------------------
             logger.info("[TRANSFORM][DAILY_AGG1] Computing 30-day average open/close metrics per symbol.")
             recent_stock_df = valid_stock_df.filter(
                 col("day_date") >= date_sub(current_date(), 30)
@@ -463,7 +532,9 @@ class StockDataTransformer:
                 thirty_day_avg_df, on="symbol", how="left",
             )
 
-            # 12. Rolling Aggregations: 52-Week High & Low
+            # ------------------------------------------------------------------
+            # Step 12: Rolling Aggregations — 52-Week High & Low
+            # ------------------------------------------------------------------
             logger.info("[TRANSFORM][DAILY_AGG2] Computing 52-week high/low metrics per symbol.")
             fifty_two_week_df = valid_stock_df.filter(
                 col("day_date") >= date_sub(current_date(), 365)
@@ -478,7 +549,9 @@ class StockDataTransformer:
                 fifty_two_week_agg, on="symbol", how="left",
             )
 
-            # 13. Rolling Aggregations: All-Time High & Low
+            # ------------------------------------------------------------------
+            # Step 13: Rolling Aggregations — All-Time High & Low
+            # ------------------------------------------------------------------
             logger.info("[TRANSFORM][DAILY_AGG3] Computing all-time high/low metrics per symbol.")
             all_time_agg = valid_stock_df.groupBy("symbol").agg(
                 F.round(F.max("high"), 2).alias("all_time_high"),
@@ -489,7 +562,9 @@ class StockDataTransformer:
                 all_time_agg, on="symbol", how="left",
             )
 
-            # 14. Partitioning Keys: year, month, day
+            # ------------------------------------------------------------------
+            # Step 14: Partitioning Keys (year, month, day)
+            # ------------------------------------------------------------------
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("year", year(col("day_date")))
@@ -497,17 +572,32 @@ class StockDataTransformer:
                 .withColumn("day", dayofmonth(col("day_date")))
             )
 
-            # 15. Final Silver Column Selection & Sorting
+            # ------------------------------------------------------------------
+            # Step 15: Final Silver Column Selection & Sorting
+            # ------------------------------------------------------------------
             valid_stock_df = valid_stock_df.select(
-                "symbol", "day_date",
-                "open", "high", "low", "close", "volume",
-                "daily_change", "daily_change_percentage", "market_movement",
-                "thirty_day_avg_open", "thirty_day_avg_close",
-                "fifty_two_week_high", "fifty_two_week_low",
-                "all_time_high", "all_time_low",
+                "symbol",
+                "day_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "daily_change",
+                "daily_change_percentage",
+                "market_movement",
+                "thirty_day_avg_open",
+                "thirty_day_avg_close",
+                "fifty_two_week_high",
+                "fifty_two_week_low",
+                "all_time_high",
+                "all_time_low",
                 "last_refreshed_date",
-                "validation_status", "validation_reason",
-                "year", "month", "day",
+                "validation_status",
+                "validation_reason",
+                "year",
+                "month",
+                "day",
                 "processed_at",
             )
 
@@ -529,9 +619,9 @@ class StockDataTransformer:
             logger.exception("[TRANSFORM][DAILY_FAIL] Error transforming daily data: %s", e)
             raise
 
-    # ============================================================
-    # COMPANY OVERVIEW TRANSFORMATION
-    # ============================================================
+    # ==========================================================================
+    # 3. COMPANY OVERVIEW TRANSFORMATION
+    # ==========================================================================
 
     # 52 Business columns to select from raw Alpha Vantage Overview API
     OVERVIEW_BUSINESS_COLUMNS = [
@@ -635,13 +725,25 @@ class StockDataTransformer:
         logger.info("[TRANSFORM][OVERVIEW_START] Starting company overview transformation.")
 
         try:
-            # 1. Select business columns
+            # ------------------------------------------------------------------
+            # Step 1: Select business columns
+            # ------------------------------------------------------------------
             data_df = data_df.select(*self.OVERVIEW_BUSINESS_COLUMNS)
 
-            # 2. String Cleaning: Trim strings & uppercase symbol
+            # ------------------------------------------------------------------
+            # Step 2: Trim strings & uppercase symbol
+            # ------------------------------------------------------------------
             string_columns = [
-                "Symbol", "AssetType", "Name", "Exchange", "Currency",
-                "Country", "Sector", "Industry", "OfficialSite", "FiscalYearEnd",
+                "Symbol",
+                "AssetType",
+                "Name",
+                "Exchange",
+                "Currency",
+                "Country",
+                "Sector",
+                "Industry",
+                "OfficialSite",
+                "FiscalYearEnd",
             ]
 
             for col_name in string_columns:
@@ -650,7 +752,9 @@ class StockDataTransformer:
 
             data_df = data_df.withColumn("Symbol", upper(col("Symbol")))
 
-            # 3. Normalize Fake Nulls
+            # ------------------------------------------------------------------
+            # Step 3: Normalize Fake Nulls
+            # ------------------------------------------------------------------
             fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
             for col_name in self.OVERVIEW_BUSINESS_COLUMNS:
@@ -662,7 +766,9 @@ class StockDataTransformer:
                     ).otherwise(col(col_name)),
                 )
 
-            # 4. Impute Missing Defaults
+            # ------------------------------------------------------------------
+            # Step 4: Impute Missing Defaults
+            # ------------------------------------------------------------------
             data_df = data_df.fillna({
                 "Country": "Unknown",
                 "Sector": "Unknown",
@@ -670,27 +776,56 @@ class StockDataTransformer:
                 "OfficialSite": "Not Available",
             })
 
-            # 5. Explicit Data Type Casting
+            # ------------------------------------------------------------------
+            # Step 5: Explicit Data Type Casting
+            # ------------------------------------------------------------------
             integer_columns = [
-                "CIK", "AnalystRatingStrongBuy", "AnalystRatingBuy",
-                "AnalystRatingHold", "AnalystRatingSell", "AnalystRatingStrongSell",
+                "CIK",
+                "AnalystRatingStrongBuy",
+                "AnalystRatingBuy",
+                "AnalystRatingHold",
+                "AnalystRatingSell",
+                "AnalystRatingStrongSell",
             ]
 
             long_columns = [
-                "MarketCapitalization", "EBITDA", "RevenueTTM",
-                "GrossProfitTTM", "SharesOutstanding", "SharesFloat",
+                "MarketCapitalization",
+                "EBITDA",
+                "RevenueTTM",
+                "GrossProfitTTM",
+                "SharesOutstanding",
+                "SharesFloat",
             ]
 
             double_columns = [
-                "PERatio", "PEGRatio", "BookValue", "DividendPerShare",
-                "DividendYield", "EPS", "RevenuePerShareTTM", "ProfitMargin",
-                "OperatingMarginTTM", "ReturnOnAssetsTTM", "ReturnOnEquityTTM",
-                "DilutedEPSTTM", "QuarterlyEarningsGrowthYOY",
-                "QuarterlyRevenueGrowthYOY", "AnalystTargetPrice",
-                "TrailingPE", "ForwardPE", "PriceToSalesRatioTTM",
-                "PriceToBookRatio", "EVToRevenue", "EVToEBITDA", "Beta",
-                "52WeekHigh", "52WeekLow", "50DayMovingAverage",
-                "200DayMovingAverage", "PercentInsiders", "PercentInstitutions",
+                "PERatio",
+                "PEGRatio",
+                "BookValue",
+                "DividendPerShare",
+                "DividendYield",
+                "EPS",
+                "RevenuePerShareTTM",
+                "ProfitMargin",
+                "OperatingMarginTTM",
+                "ReturnOnAssetsTTM",
+                "ReturnOnEquityTTM",
+                "DilutedEPSTTM",
+                "QuarterlyEarningsGrowthYOY",
+                "QuarterlyRevenueGrowthYOY",
+                "AnalystTargetPrice",
+                "TrailingPE",
+                "ForwardPE",
+                "PriceToSalesRatioTTM",
+                "PriceToBookRatio",
+                "EVToRevenue",
+                "EVToEBITDA",
+                "Beta",
+                "52WeekHigh",
+                "52WeekLow",
+                "50DayMovingAverage",
+                "200DayMovingAverage",
+                "PercentInsiders",
+                "PercentInstitutions",
             ]
 
             date_columns = ["LatestQuarter", "DividendDate", "ExDividendDate"]
@@ -707,7 +842,9 @@ class StockDataTransformer:
             for c in date_columns:
                 data_df = data_df.withColumn(c, to_date(col(c), "yyyy-MM-dd"))
 
-            # 6. Partitioning Metadata
+            # ------------------------------------------------------------------
+            # Step 6: Partitioning Metadata (year, month, day)
+            # ------------------------------------------------------------------
             data_df = (
                 data_df
                 .withColumn("year", year(current_date()))
@@ -715,12 +852,16 @@ class StockDataTransformer:
                 .withColumn("day", dayofmonth(current_date()))
             )
 
-            # 7. Rename to snake_case column names
+            # ------------------------------------------------------------------
+            # Step 7: Rename to snake_case column names
+            # ------------------------------------------------------------------
             for old_name, new_name in self.OVERVIEW_COLUMN_MAPPING.items():
                 if old_name in data_df.columns:
                     data_df = data_df.withColumnRenamed(old_name, new_name)
 
-            # 8. Add Processed Timestamp
+            # ------------------------------------------------------------------
+            # Step 8: Add Processed Timestamp
+            # ------------------------------------------------------------------
             data_df = data_df.withColumn(
                 "processed_at",
                 from_utc_timestamp(current_timestamp(), "Asia/Kolkata"),
