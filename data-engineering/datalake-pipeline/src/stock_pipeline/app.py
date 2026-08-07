@@ -682,7 +682,7 @@ def lambda_handler(event, context):
     AWS Lambda handler entry point.
 
     Accepts an event payload containing optional `stock_symbols` and `full_load` flag.
-    Defaults to `stock_symbols=["IBM"]` and `full_load=False` if not specified.
+    Also checks `FULL_LOAD` environment variable if not passed in event payload.
 
     Sample Event Payload:
       {
@@ -706,7 +706,10 @@ def lambda_handler(event, context):
 
     is_dict = isinstance(event, dict)
     stock_symbols = event.get("stock_symbols", ["IBM"]) if is_dict else ["IBM"]
-    full_load = bool(event.get("full_load", False)) if is_dict else False
+
+    # Check event dict first, fall back to FULL_LOAD environment variable
+    env_full_load = os.getenv("FULL_LOAD", "false").lower() in ("true", "1", "yes")
+    full_load = bool(event.get("full_load", env_full_load)) if is_dict else env_full_load
 
     try:
         stock_pipeline = StockPipeline()
@@ -761,10 +764,12 @@ def lambda_handler(event, context):
 # ============================================================
 
 if __name__ == "__main__":
-    logger.info("[LOCAL] Executing Stock Data Pipeline locally.")
+    import os
+    env_full_load = os.getenv("FULL_LOAD", "false").lower() in ("true", "1", "yes")
+    logger.info("[LOCAL] Executing Stock Data Pipeline locally (FULL_LOAD=%s).", env_full_load)
 
     try:
-        lambda_handler({}, {})
+        lambda_handler({"full_load": env_full_load}, {})
         logger.info("[LOCAL] Execution completed successfully.")
 
     except Exception as e:
