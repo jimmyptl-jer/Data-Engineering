@@ -1,9 +1,29 @@
 """
-Watermark Manager — Manages watermark state for incremental ETL pipelines.
+Watermark State Manager Module.
 
-Supports two incremental strategies:
-  - Date-based watermark   → for transactional / time-series data.
-  - Hash-based detection   → for reference / master data.
+Manages pipeline state persistence for incremental ETL processing across the Medallion architecture.
+
+Watermark Storage Architecture:
+  s3a://{S3_BUCKET_NAME}/watermark/{pipeline_name}/{dataset_name}.json
+
+  Sample Watermark JSON Schema:
+  {
+    "pipeline_name": "bronze_to_silver",
+    "dataset_name": "daily_time_series",
+    "watermark_column": "day_date",
+    "watermark_value": "2026-08-06",
+    "last_processed_at": "2026-08-07T03:30:00+00:00",
+    "batch_id": "batch_20260807_033000",
+    "status": "SUCCESS",
+    "updated_at": "2026-08-07T03:31:45+00:00",
+    "updated_by": "stock_pipeline",
+    "remarks": "Bronze to Silver completed successfully."
+  }
+
+Hadoop FileSystem Integration:
+  Uses PySpark's JVM gateway (`org.apache.hadoop.fs.FileSystem`) for atomic existence checks
+  across S3 (`s3a://`), HDFS (`hdfs://`), and local filesystem (`file://`) paths without requiring
+  boto3 list operations or throwing PySpark FileNotFound exceptions.
 """
 
 import logging
@@ -18,23 +38,15 @@ logger = logging.getLogger(__name__)
 
 class WatermarkManager:
     """
-    Manages watermark operations for all ETL pipelines.
-
-    Responsibilities:
-        - Check whether a watermark exists.
-        - Create an initial watermark.
-        - Read the latest watermark.
-        - Write/update the watermark after a successful pipeline run.
-        - Compute content hashes for hash-based change detection.
-        - Compare hashes to decide whether processing is needed.
+    Manages watermark CRUD operations and state checks for ETL pipelines.
     """
 
     def __init__(self, spark: SparkSession):
         """
-        Initialize the Watermark Manager.
+        Initialize WatermarkManager with active SparkSession.
 
         Args:
-            spark: Active SparkSession.
+            spark: Active SparkSession instance.
         """
         self.spark = spark
         self.watermark_base_path = config.WATERMARK_BASE_PATH
@@ -45,16 +57,15 @@ class WatermarkManager:
 
     def _path_exists(self, path_str: str) -> bool:
         """
-        Check whether a path exists on the configured filesystem (S3/HDFS/local).
+        Check whether a path exists on the underlying storage filesystem (S3/HDFS/local).
 
-        Uses the Hadoop FileSystem API via the Spark JVM gateway, so it works
-        transparently with s3a://, hdfs://, and file:// paths.
+        Uses Hadoop FileSystem API via Spark JVM Gateway to avoid raising PySpark read exceptions.
 
         Args:
-            path_str: Fully qualified path to check.
+            path_str: Fully qualified path URI to check.
 
         Returns:
-            True if the path exists, otherwise False.
+            bool: True if path exists, False otherwise.
         """
         gateway = self.spark.sparkContext._jvm
         hadoop_path = gateway.org.apache.hadoop.fs.Path(path_str)
@@ -70,14 +81,14 @@ class WatermarkManager:
         dataset_name: str,
     ) -> str:
         """
-        Build the full path for the watermark file.
+        Build fully qualified S3 watermark JSON file URI.
 
         Args:
-            pipeline_name: Name of the pipeline (e.g. bronze_to_silver).
-            dataset_name: Name of the dataset (e.g. daily_time_series).
+            pipeline_name: Pipeline identifier (e.g. 'bronze_to_silver').
+            dataset_name: Dataset identifier (e.g. 'daily_time_series').
 
         Returns:
-            Full watermark path (e.g. s3a://bucket/watermark/bronze_to_silver/daily_time_series.json).
+            str: Full watermark path URI (e.g. 's3a://graywolf--data--lake/watermark/bronze_to_silver/daily_time_series.json').
         """
         watermark_path = (
             f"{self.watermark_base_path}"
@@ -86,7 +97,7 @@ class WatermarkManager:
         )
 
         logger.debug(
-            "[WATERMARK][BUILD_PATH] Watermark path: %s",
+            "[WATERMARK][BUILD_PATH] Constructed watermark URI: %s",
             watermark_path,
         )
 
@@ -102,14 +113,14 @@ class WatermarkManager:
         dataset_name: str,
     ) -> bool:
         """
-        Check whether a watermark file exists.
+        Check if a watermark state JSON file exists for the given pipeline and dataset.
 
         Args:
             pipeline_name: Pipeline identifier.
             dataset_name: Dataset identifier.
 
         Returns:
-            True if the watermark exists, otherwise False.
+            bool: True if watermark JSON exists, False otherwise.
         """
         try:
             watermark_path = self._build_watermark_path(
@@ -120,7 +131,7 @@ class WatermarkManager:
             exists = self._path_exists(watermark_path)
 
             logger.info(
-                "[WATERMARK][EXISTS] pipeline=%s, dataset=%s, exists=%s",
+                "[WATERMARK][EXISTS_CHECK] pipeline=%s, dataset=%s, watermark_exists=%s",
                 pipeline_name,
                 dataset_name,
                 exists,
@@ -130,7 +141,8 @@ class WatermarkManager:
 
         except Exception as e:
             logger.exception(
-                "[WATERMARK][EXISTS_FAIL] Failed to check watermark existence: %s",
+                "[WATERMARK][EXISTS_FAIL] Error checking watermark existence for dataset=%s: %s",
+                dataset_name,
                 e,
             )
             raise
@@ -145,17 +157,20 @@ class WatermarkManager:
         dataset_name: str,
     ) -> dict:
         """
-        Read the current watermark for a given pipeline and dataset.
+        Read and return the latest watermark state dictionary for a given pipeline and dataset.
 
         Args:
             pipeline_name: Pipeline identifier.
             dataset_name: Dataset identifier.
 
         Returns:
-            Watermark information as a dictionary.
+            dict: Parsed watermark dictionary payload.
+
+        Raises:
+            Exception: If reading or parsing JSON fails.
         """
         logger.info(
-            "[WATERMARK][READ] Reading watermark for pipeline=%s, dataset=%s.",
+            "[WATERMARK][READ] Reading watermark state for pipeline=%s, dataset=%s.",
             pipeline_name,
             dataset_name,
         )
@@ -180,7 +195,7 @@ class WatermarkManager:
             )
 
             logger.debug(
-                "[WATERMARK][READ_OK] Watermark contents: %s",
+                "[WATERMARK][READ_OK] Watermark payload contents: %s",
                 watermark,
             )
 
@@ -188,7 +203,7 @@ class WatermarkManager:
 
         except Exception as e:
             logger.exception(
-                "[WATERMARK][READ_FAIL] Failed to read watermark for "
+                "[WATERMARK][READ_FAIL] Failed to read watermark state for "
                 "pipeline=%s, dataset=%s: %s",
                 pipeline_name,
                 dataset_name,
@@ -202,13 +217,15 @@ class WatermarkManager:
 
     def write_watermark(self, watermark: dict) -> None:
         """
-        Create or update the watermark.
+        Create or overwrite the watermark state JSON file.
 
-        The watermark dict must contain ``pipeline_name`` and
-        ``dataset_name`` keys so the correct path can be derived.
+        The `watermark` payload must contain `pipeline_name` and `dataset_name` keys.
 
         Args:
-            watermark: Complete watermark payload to persist.
+            watermark: Complete watermark metadata dictionary payload to write.
+
+        Raises:
+            Exception: If Spark write operation fails.
         """
         try:
             watermark_path = self._build_watermark_path(
@@ -217,12 +234,12 @@ class WatermarkManager:
             )
 
             logger.info(
-                "[WATERMARK][WRITE] Writing watermark to %s",
+                "[WATERMARK][WRITE] Persisting watermark payload to URI: %s",
                 watermark_path,
             )
 
             logger.debug(
-                "[WATERMARK][WRITE] Watermark payload: %s",
+                "[WATERMARK][WRITE] Payload: %s",
                 watermark,
             )
 
@@ -235,14 +252,13 @@ class WatermarkManager:
             )
 
             logger.info(
-                "[WATERMARK][WRITE_OK] Watermark written successfully for "
-                "dataset=%s.",
+                "[WATERMARK][WRITE_OK] Watermark persisted successfully for dataset=%s.",
                 watermark["dataset_name"],
             )
 
         except Exception as e:
             logger.exception(
-                "[WATERMARK][WRITE_FAIL] Failed to write watermark: %s",
+                "[WATERMARK][WRITE_FAIL] Failed to persist watermark: %s",
                 e,
             )
             raise

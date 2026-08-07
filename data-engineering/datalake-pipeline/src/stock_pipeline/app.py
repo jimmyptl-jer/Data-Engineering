@@ -634,15 +634,42 @@ class StockPipeline:
             # Step 4: Silver -> Gold Unified Dataset
             self._build_gold_layer(execution_start_time)
 
-            # Execution duration metric
+            # Execution duration metric & metrics summary log
             duration = (datetime.now(timezone.utc) - execution_start_time).total_seconds()
-            logger.info("[PIPELINE] ETL pipeline completed successfully. Execution duration: %.2f seconds.", duration)
+            successful_count = len([r for r in results if "error" not in r])
+            failed_count = len([r for r in results if "error" in r])
+
+            logger.info(
+                "\n"
+                "============================================================\n"
+                "               PIPELINE EXECUTION METRICS SUMMARY           \n"
+                "============================================================\n"
+                " Batch ID        : %s\n"
+                " Execution Time  : %s\n"
+                " Duration        : %.2f seconds\n"
+                " Target Symbols  : %s\n"
+                " Load Mode       : %s\n"
+                " API Results     : %d Successful, %d Failed\n"
+                " Silver Daily    : %s\n"
+                " Silver Overview : %s\n"
+                " Gold Dataset    : Rebuilt & Persisted\n"
+                "============================================================",
+                batch_id,
+                execution_start_time.isoformat(),
+                duration,
+                stock_symbols,
+                "FULL LOAD (20+ Years History)" if full_load else "INCREMENTAL LOAD (Last 100 Days)",
+                successful_count,
+                failed_count,
+                "WRITTEN (New Records Found)" if daily_written else "SKIPPED (No New Records)",
+                "WRITTEN" if overview_written else "SKIPPED",
+            )
 
             return results
 
         except Exception:
             duration = (datetime.now(timezone.utc) - execution_start_time).total_seconds()
-            logger.exception("[PIPELINE] ETL pipeline failed after %.2f seconds.", duration)
+            logger.exception("[PIPELINE] ETL pipeline execution failed after %.2f seconds.", duration)
             raise
 
 

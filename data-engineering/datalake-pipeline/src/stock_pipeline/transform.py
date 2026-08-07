@@ -1,8 +1,29 @@
 """
-Transform stage — Bronze-to-Silver data transformations.
+Transform Stage — Bronze-to-Silver Data Transformations.
 
-Each transform method receives a raw Bronze DataFrame and returns a
-cleaned, validated, enriched Silver-ready DataFrame.
+Each transform method receives a raw Bronze PySpark DataFrame and executes a
+multi-step data processing pipeline, producing a cleaned, validated, enriched Silver-ready DataFrame.
+
+Transformation Pipeline Sequence (Daily Time Series):
+  Raw JSON ──► Flatten / Explode ──► Watermark Filter ──► String Trim & Clean ──► Fake Null Normalization
+                 │
+                 ▼
+  Type Casting (double, long, date) ──► Data Quality Validation (VALID/INVALID) ──► Quarantine Invalid Rows
+                 │
+                 ▼
+  Deduplication ──► Rounding ──► Metric Enrichment (daily_change %, Bull/Bear)
+                 │
+                 ▼
+  Rolling Aggregations (30-day Avg, 52-week High/Low, All-time High/Low) ──► Partition Keys (year/month/day)
+                 │
+                 ▼
+  Final Column Ordering & Silver Readyness
+
+Transformation Pipeline Sequence (Company Overview):
+  Raw JSON ──► Column Selection (52 business fields) ──► Trim & Upper Symbol ──► Fake Null Normalization
+                 │
+                 ▼
+  Default Value Imputation (Country/Sector) ──► Explicit Type Casting ──► snake_case Mapping ──► Processed Timestamp
 """
 
 from __future__ import annotations
@@ -42,20 +63,20 @@ logger = logging.getLogger(__name__)
 
 class StockDataTransformer:
     """
-    Transforms raw Bronze stock data into clean Silver-layer DataFrames.
-
-    Responsibilities:
-        - Flatten nested JSON structures.
-        - Trim, normalize, and cast columns.
-        - Validate data quality (flag VALID / INVALID rows).
-        - Enrich with derived metrics (change %, rolling averages, etc.).
+    Transforms raw Bronze stock DataFrames into clean, typed, validated, and enriched Silver DataFrames.
     """
 
     def __init__(self, spark: SparkSession):
+        """
+        Initialize StockDataTransformer.
+
+        Args:
+            spark: Active SparkSession instance.
+        """
         self.spark = spark
 
     # ============================================================
-    # WEEKLY TIME SERIES (kept for future use)
+    # WEEKLY TIME SERIES (kept for future architecture expansion)
     # ============================================================
 
     def transform_weekly_timeseries(
@@ -66,18 +87,25 @@ class StockDataTransformer:
         """
         Transform Alpha Vantage Weekly Time Series Bronze data
         into a cleaned, validated, enriched Silver-ready DataFrame.
+
+        Args:
+            data_df: Raw Bronze DataFrame matching `stock_schema_weekly`.
+            debug: If True, prints schema and sample rows to debug logs.
+
+        Returns:
+            DataFrame: Transformed Silver weekly DataFrame.
         """
         logger.info("[TRANSFORM][WEEKLY_START] Starting weekly time-series transformation.")
 
         try:
-            # 1. FLATTEN
+            # Step 1: Flatten nested JSON structure
             raw_df = data_df.select(
                 col("`Meta Data`.`2. Symbol`").alias("symbol"),
                 col("`Meta Data`.`3. Last Refreshed`").alias("last_refreshed"),
                 explode(col("`Weekly Time Series`")).alias("week_date", "weekly_data"),
             )
 
-            # 2. SELECT COLUMNS
+            # Step 2: Select and alias OHLCV fields
             stock_df = raw_df.select(
                 col("symbol"),
                 col("last_refreshed"),
@@ -89,7 +117,7 @@ class StockDataTransformer:
                 col("weekly_data.`5. volume`").alias("volume"),
             )
 
-            # 3. DATA CLEANING
+            # Step 3: Trim whitespace and uppercase ticker symbol
             string_columns = [
                 "symbol", "last_refreshed", "week_date",
                 "open", "high", "low", "close", "volume",
@@ -100,6 +128,7 @@ class StockDataTransformer:
 
             stock_df = stock_df.withColumn("symbol", upper(col("symbol")))
 
+            # Normalize string placeholders ("n/a", "none", "-", "null") to Spark NULL
             fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
             for column_name in string_columns:
@@ -111,7 +140,7 @@ class StockDataTransformer:
                     ).otherwise(col(column_name)),
                 )
 
-            # 4. TYPE CONVERSION
+            # Step 4: Cast strings to explicit data types
             stock_df = (
                 stock_df
                 .withColumn("week_date", to_date(col("week_date"), "yyyy-MM-dd"))
@@ -123,7 +152,7 @@ class StockDataTransformer:
                 .withColumn("volume", col("volume").cast("long"))
             )
 
-            # 5. DATA QUALITY VALIDATION
+            # Step 5: Data Quality Validation
             stock_df = stock_df.withColumn(
                 "validation_status",
                 when(col("symbol").isNull(), "INVALID")
@@ -143,7 +172,7 @@ class StockDataTransformer:
                 .otherwise("VALID"),
             )
 
-            # 6. VALIDATION REASON
+            # Step 6: Validation Reason Tagging
             stock_df = stock_df.withColumn(
                 "validation_reason",
                 when(col("symbol").isNull(), "Missing symbol")
@@ -163,16 +192,16 @@ class StockDataTransformer:
                 .otherwise(None),
             )
 
-            # 7. FILTER VALID RECORDS
+            # Step 7: Filter VALID Records
             valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
             invalid_record_count = stock_df.filter(col("validation_status") == "INVALID").count()
             logger.info("[TRANSFORM][WEEKLY] Found %d invalid records.", invalid_record_count)
 
-            # 8. DEDUPLICATE
+            # Step 8: Deduplicate on (symbol, week_date)
             valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "week_date"])
 
-            # 9. ROUND PRICE COLUMNS
+            # Step 9: Round numeric columns
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("open", round(col("open"), 2))
@@ -181,7 +210,7 @@ class StockDataTransformer:
                 .withColumn("close", round(col("close"), 2))
             )
 
-            # 10. ENRICHMENT
+            # Step 10: Derived Metrics & Timestamps
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("weekly_change", round(col("close") - col("open"), 2))
@@ -202,7 +231,7 @@ class StockDataTransformer:
                 .withColumnRenamed("last_refreshed", "last_refreshed_date")
             )
 
-            # 11. FINAL COLUMN SELECTION
+            # Step 11: Final Selection and Sorting
             valid_stock_df = valid_stock_df.select(
                 "symbol", "week_date",
                 "open", "high", "low", "close", "volume",
@@ -232,7 +261,7 @@ class StockDataTransformer:
             raise
 
     # ============================================================
-    # DAILY TIME SERIES
+    # DAILY TIME SERIES TRANSFORMATION
     # ============================================================
 
     def silver_transform_daily_timeseries(
@@ -243,32 +272,47 @@ class StockDataTransformer:
         debug: bool = False,
     ) -> DataFrame:
         """
-        Transform Alpha Vantage Daily Time Series Bronze data
-        into a cleaned, validated, enriched Silver-ready DataFrame.
+        Transform Alpha Vantage Daily Time Series Bronze data into Silver-ready DataFrame.
+
+        Execution DAG Pipeline Steps:
+          1. Flatten nested JSON (`Time Series (Daily)`) via `explode()`.
+          2. Alias OHLCV fields.
+          3. Apply Date Watermark filter (`day_date > watermark_value`) if provided.
+          4. String cleaning & Fake Null normalization (`"n/a"`, `"none"`, `"-"` -> NULL).
+          5. Type casting (date, double, long).
+          6. Data Quality assertions & quarantine tagging (`VALID` vs `INVALID`).
+          7. Filter valid records & count invalids.
+          8. Deduplicate on `(symbol, day_date)`.
+          9. Round price columns to 2 decimal places.
+         10. Enrich metrics (`daily_change`, `daily_change_percentage`, `market_movement`).
+         11. Compute 30-day rolling average open & close per symbol.
+         12. Compute 52-week high & low per symbol.
+         13. Compute all-time high & low per symbol.
+         14. Generate partition keys (`year`, `month`, `day`).
+         15. Order and select final Silver schema.
 
         Args:
-            daily_dataset: Dataset name (used for logging).
-            data_df: Raw Bronze DataFrame.
-            watermark_value: If provided, only rows with day_date > this value
-                are included (incremental load). None means full load.
-            debug: If True, print schema and sample rows.
+            daily_dataset: Dataset identifier string (for logging).
+            data_df: Raw Bronze PySpark DataFrame matching `stock_schema_daily`.
+            watermark_value: Last processed date string (ISO 'YYYY-MM-DD'). If set, filters new records.
+            debug: If True, prints schema and sample rows.
 
         Returns:
-            Silver-ready DataFrame (may be empty if no new records).
+            DataFrame: Transformed Silver daily DataFrame (empty if no new records).
         """
-        logger.info("[TRANSFORM][DAILY_START] Starting daily time-series transformation.")
+        logger.info("[TRANSFORM][DAILY_START] Starting daily time-series transformation pipeline.")
 
         try:
-            # 1. FLATTEN
-            logger.info("[TRANSFORM][DAILY] Flattening daily time-series.")
-
+            # 1. Flatten nested JSON
+            logger.info("[TRANSFORM][DAILY_STEP1] Flattening nested JSON structure.")
             raw_df = data_df.select(
                 col("`Meta Data`.`2. Symbol`").alias("symbol"),
                 col("`Meta Data`.`3. Last Refreshed`").alias("last_refreshed"),
                 explode(col("Time Series (Daily)")).alias("day_date", "daily_data"),
             )
 
-            # 2. SELECT COLUMNS
+            # 2. Select and alias OHLCV columns
+            logger.info("[TRANSFORM][DAILY_STEP2] Selecting and aliasing OHLCV fields.")
             stock_df = raw_df.select(
                 col("symbol"),
                 col("last_refreshed"),
@@ -280,17 +324,17 @@ class StockDataTransformer:
                 col("daily_data.`5. volume`").alias("volume"),
             )
 
-            # WATERMARK FILTER (incremental load)
+            # 3. Watermark Filter (Incremental Load Optimization)
             if watermark_value is not None:
                 logger.info(
-                    "[TRANSFORM][DAILY] Applying watermark filter: day_date > '%s'.",
+                    "[TRANSFORM][DAILY_WATERMARK] Applying date watermark filter: day_date > '%s'.",
                     watermark_value,
                 )
                 stock_df = stock_df.filter(col("day_date") > watermark_value)
             else:
-                logger.info("[TRANSFORM][DAILY] No watermark — performing full load.")
+                logger.info("[TRANSFORM][DAILY_WATERMARK] No watermark provided — executing full historical load.")
 
-            # 3. DATA CLEANING
+            # 4. String Cleaning & Fake Null Normalization
             string_columns = [
                 "symbol", "last_refreshed", "day_date",
                 "open", "high", "low", "close", "volume",
@@ -312,7 +356,7 @@ class StockDataTransformer:
                     ).otherwise(col(column_name)),
                 )
 
-            # 4. TYPE CONVERSION
+            # 5. Data Type Conversion
             stock_df = (
                 stock_df
                 .withColumn("day_date", to_date(col("day_date"), "yyyy-MM-dd"))
@@ -324,7 +368,7 @@ class StockDataTransformer:
                 .withColumn("volume", col("volume").cast("long"))
             )
 
-            # 5. DATA QUALITY VALIDATION
+            # 6. Data Quality Validation (Quarantine Pattern)
             stock_df = stock_df.withColumn(
                 "validation_status",
                 when(col("symbol").isNull(), "INVALID")
@@ -344,7 +388,7 @@ class StockDataTransformer:
                 .otherwise("VALID"),
             )
 
-            # 6. VALIDATION REASON
+            # Validation Reason Tagging for Audit
             stock_df = stock_df.withColumn(
                 "validation_reason",
                 when(col("symbol").isNull(), "Missing symbol")
@@ -364,16 +408,16 @@ class StockDataTransformer:
                 .otherwise(None),
             )
 
-            # 7. FILTER VALID RECORDS
+            # 7. Quarantine Filter: Keep VALID rows for Silver
             valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
             invalid_record_count = stock_df.filter(col("validation_status") == "INVALID").count()
-            logger.info("[TRANSFORM][DAILY] Found %d invalid records.", invalid_record_count)
+            logger.info("[TRANSFORM][DAILY_DQ] Data Quality check completed. Quarantined invalid records: %d", invalid_record_count)
 
-            # 8. DEDUPLICATE
+            # 8. Deduplicate on (symbol, day_date)
             valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "day_date"])
 
-            # 9. ROUND PRICE COLUMNS
+            # 9. Round Price Fields
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("open", round(col("open"), 2))
@@ -382,7 +426,7 @@ class StockDataTransformer:
                 .withColumn("close", round(col("close"), 2))
             )
 
-            # 10. ENRICHMENT
+            # 10. Metric Enrichment (daily_change, daily_change_percentage, market_movement)
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("daily_change", round(col("close") - col("open"), 2))
@@ -404,9 +448,8 @@ class StockDataTransformer:
                 logger.debug("[TRANSFORM][DAILY] Valid data schema:")
                 valid_stock_df.printSchema()
 
-            # 11. 30-DAY ROLLING AVERAGES
-            logger.info("[TRANSFORM][DAILY] Computing 30-day average open/close per symbol.")
-
+            # 11. Rolling Aggregations: 30-Day Average Open & Close
+            logger.info("[TRANSFORM][DAILY_AGG1] Computing 30-day average open/close metrics per symbol.")
             recent_stock_df = valid_stock_df.filter(
                 col("day_date") >= date_sub(current_date(), 30)
             )
@@ -420,9 +463,8 @@ class StockDataTransformer:
                 thirty_day_avg_df, on="symbol", how="left",
             )
 
-            # 12. 52-WEEK HIGH / LOW
-            logger.info("[TRANSFORM][DAILY] Computing 52-week high/low per symbol.")
-
+            # 12. Rolling Aggregations: 52-Week High & Low
+            logger.info("[TRANSFORM][DAILY_AGG2] Computing 52-week high/low metrics per symbol.")
             fifty_two_week_df = valid_stock_df.filter(
                 col("day_date") >= date_sub(current_date(), 365)
             )
@@ -436,7 +478,8 @@ class StockDataTransformer:
                 fifty_two_week_agg, on="symbol", how="left",
             )
 
-            # 13. ALL-TIME HIGH / LOW
+            # 13. Rolling Aggregations: All-Time High & Low
+            logger.info("[TRANSFORM][DAILY_AGG3] Computing all-time high/low metrics per symbol.")
             all_time_agg = valid_stock_df.groupBy("symbol").agg(
                 F.round(F.max("high"), 2).alias("all_time_high"),
                 F.round(F.min("low"), 2).alias("all_time_low"),
@@ -446,7 +489,7 @@ class StockDataTransformer:
                 all_time_agg, on="symbol", how="left",
             )
 
-            # 14. DATE PARTITION METADATA
+            # 14. Partitioning Keys: year, month, day
             valid_stock_df = (
                 valid_stock_df
                 .withColumn("year", year(col("day_date")))
@@ -454,7 +497,7 @@ class StockDataTransformer:
                 .withColumn("day", dayofmonth(col("day_date")))
             )
 
-            # 15. FINAL COLUMN SELECTION & ORDERING
+            # 15. Final Silver Column Selection & Sorting
             valid_stock_df = valid_stock_df.select(
                 "symbol", "day_date",
                 "open", "high", "low", "close", "volume",
@@ -474,12 +517,12 @@ class StockDataTransformer:
             )
 
             if debug:
-                logger.debug("[TRANSFORM][DAILY] Final schema:")
+                logger.debug("[TRANSFORM][DAILY] Final Silver DataFrame Schema:")
                 valid_stock_df.printSchema()
-                logger.debug("[TRANSFORM][DAILY] Sample data:")
+                logger.debug("[TRANSFORM][DAILY] Sample Silver DataFrame Rows:")
                 valid_stock_df.show(10, truncate=False)
 
-            logger.info("[TRANSFORM][DAILY_OK] Daily time-series transformation completed.")
+            logger.info("[TRANSFORM][DAILY_OK] Daily time-series transformation completed successfully.")
             return valid_stock_df
 
         except Exception as e:
@@ -487,10 +530,10 @@ class StockDataTransformer:
             raise
 
     # ============================================================
-    # COMPANY OVERVIEW
+    # COMPANY OVERVIEW TRANSFORMATION
     # ============================================================
 
-    # Columns to select from the raw Overview API response.
+    # 52 Business columns to select from raw Alpha Vantage Overview API
     OVERVIEW_BUSINESS_COLUMNS = [
         "Symbol", "AssetType", "Name", "CIK", "Exchange", "Currency",
         "Country", "Sector", "Industry", "OfficialSite", "FiscalYearEnd",
@@ -509,7 +552,7 @@ class StockDataTransformer:
         "DividendDate", "ExDividendDate",
     ]
 
-    # Snake_case mapping for Silver-layer column names.
+    # PascalCase to snake_case column mapping dictionary
     OVERVIEW_COLUMN_MAPPING = {
         "Symbol": "symbol",
         "AssetType": "asset_type",
@@ -571,22 +614,31 @@ class StockDataTransformer:
         data_df: DataFrame,
     ) -> DataFrame:
         """
-        Transform Alpha Vantage Company Overview Bronze data into a
-        cleaned, typed, Silver-ready DataFrame.
+        Transform Alpha Vantage Company Overview Bronze data into a cleaned, typed Silver DataFrame.
+
+        Execution Steps:
+          1. Select 52 business columns.
+          2. Trim string columns & upper-case symbol.
+          3. Normalize fake nulls ("n/a", "-", "null" -> NULL).
+          4. Impute missing defaults (Country="Unknown", Sector="Unknown").
+          5. Type cast fields to IntegerType, LongType, DoubleType, DateType.
+          6. Generate partition metadata (year, month, day).
+          7. Rename column names to snake_case.
+          8. Add processed_at timestamp.
 
         Args:
-            data_df: Raw Bronze overview DataFrame.
+            data_df: Raw Bronze overview PySpark DataFrame.
 
         Returns:
-            Silver-ready overview DataFrame.
+            DataFrame: Transformed Silver overview DataFrame.
         """
         logger.info("[TRANSFORM][OVERVIEW_START] Starting company overview transformation.")
 
         try:
-            # 1. SELECT BUSINESS COLUMNS
+            # 1. Select business columns
             data_df = data_df.select(*self.OVERVIEW_BUSINESS_COLUMNS)
 
-            # 2. DATA CLEANING — trim strings
+            # 2. String Cleaning: Trim strings & uppercase symbol
             string_columns = [
                 "Symbol", "AssetType", "Name", "Exchange", "Currency",
                 "Country", "Sector", "Industry", "OfficialSite", "FiscalYearEnd",
@@ -598,12 +650,10 @@ class StockDataTransformer:
 
             data_df = data_df.withColumn("Symbol", upper(col("Symbol")))
 
-            # 3. NORMALIZE FAKE NULLS
+            # 3. Normalize Fake Nulls
             fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
-            columns_to_clean = self.OVERVIEW_BUSINESS_COLUMNS
-
-            for col_name in columns_to_clean:
+            for col_name in self.OVERVIEW_BUSINESS_COLUMNS:
                 data_df = data_df.withColumn(
                     col_name,
                     when(
@@ -612,7 +662,7 @@ class StockDataTransformer:
                     ).otherwise(col(col_name)),
                 )
 
-            # 4. FILL DEFAULTS
+            # 4. Impute Missing Defaults
             data_df = data_df.fillna({
                 "Country": "Unknown",
                 "Sector": "Unknown",
@@ -620,7 +670,7 @@ class StockDataTransformer:
                 "OfficialSite": "Not Available",
             })
 
-            # 5. TYPE CASTING
+            # 5. Explicit Data Type Casting
             integer_columns = [
                 "CIK", "AnalystRatingStrongBuy", "AnalystRatingBuy",
                 "AnalystRatingHold", "AnalystRatingSell", "AnalystRatingStrongSell",
@@ -657,7 +707,7 @@ class StockDataTransformer:
             for c in date_columns:
                 data_df = data_df.withColumn(c, to_date(col(c), "yyyy-MM-dd"))
 
-            # 6. DATE PARTITION METADATA
+            # 6. Partitioning Metadata
             data_df = (
                 data_df
                 .withColumn("year", year(current_date()))
@@ -665,18 +715,18 @@ class StockDataTransformer:
                 .withColumn("day", dayofmonth(current_date()))
             )
 
-            # 7. RENAME TO SNAKE_CASE
+            # 7. Rename to snake_case column names
             for old_name, new_name in self.OVERVIEW_COLUMN_MAPPING.items():
                 if old_name in data_df.columns:
                     data_df = data_df.withColumnRenamed(old_name, new_name)
 
-            # 8. ADD PROCESSED TIMESTAMP
+            # 8. Add Processed Timestamp
             data_df = data_df.withColumn(
                 "processed_at",
                 from_utc_timestamp(current_timestamp(), "Asia/Kolkata"),
             )
 
-            logger.info("[TRANSFORM][OVERVIEW_OK] Company overview transformation completed.")
+            logger.info("[TRANSFORM][OVERVIEW_OK] Company overview transformation completed successfully.")
             return data_df
 
         except Exception as e:
