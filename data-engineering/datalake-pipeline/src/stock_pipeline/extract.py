@@ -124,7 +124,7 @@ stock_overview_schema = StructType([
 
 class StockDataExtractor:
     """
-    Handles data extraction from external APIs and S3 Bronze/Silver data lake partitions.
+    Handles extraction operations across REST API, Bronze S3, and Silver S3 storage tiers.
     """
 
     def __init__(self, spark: SparkSession):
@@ -138,8 +138,31 @@ class StockDataExtractor:
         self.bucket_name = config.S3_BUCKET_NAME
 
     # ============================================================
-    # S3 PATH BUILDERS
+    # S3 PATH BUILDERS & EXISTENCE CHECKS
     # ============================================================
+
+    def _path_exists(self, path_str: str) -> bool:
+        """
+        Check whether a path exists on the storage filesystem (S3/HDFS/local).
+        Uses Hadoop FileSystem JVM gateway API.
+
+        Args:
+            path_str: S3 or local URI to check.
+
+        Returns:
+            bool: True if path exists, False otherwise.
+        """
+        try:
+            gateway = self.spark.sparkContext._jvm
+            hadoop_path = gateway.org.apache.hadoop.fs.Path(path_str)
+            conf = self.spark.sparkContext._jsc.hadoopConfiguration()
+            file_system = gateway.org.apache.hadoop.fs.FileSystem.get(
+                hadoop_path.toUri(), conf
+            )
+            return file_system.exists(hadoop_path)
+        except Exception as e:
+            logger.debug("[EXTRACT][PATH_CHECK] Path existence check exception for %s: %s", path_str, e)
+            return False
 
     def _bronze_bucket_key(self, dataset: str, execution_start_time: datetime) -> str:
         """
@@ -204,10 +227,6 @@ class StockDataExtractor:
 
         Returns:
             dict: Decoded JSON response payload from Alpha Vantage.
-
-        Raises:
-            requests.exceptions.RequestException: If HTTP connection or status fails.
-            ValueError: If JSON decoding fails.
         """
         symbol = params.get("symbol") if params else None
         function = params.get("function") if params else None
@@ -282,6 +301,10 @@ class StockDataExtractor:
         bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
         logger.info("[EXTRACT][BRONZE_WEEKLY] Reading JSON files from: %s", bucket_key)
 
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][BRONZE_WEEKLY_SKIP] Path does not exist: %s. Returning empty DataFrame.", bucket_key)
+            return self.spark.createDataFrame([], schema=stock_schema_weekly)
+
         try:
             df = (
                 self.spark.read
@@ -314,6 +337,10 @@ class StockDataExtractor:
         bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
         logger.info("[EXTRACT][BRONZE_DAILY] Reading JSON files from: %s", bucket_key)
 
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][BRONZE_DAILY_SKIP] S3 partition path does not exist: %s. Returning empty DataFrame.", bucket_key)
+            return self.spark.createDataFrame([], schema=stock_schema_daily)
+
         try:
             df = (
                 self.spark.read
@@ -345,6 +372,10 @@ class StockDataExtractor:
         """
         bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
         logger.info("[EXTRACT][BRONZE_OVERVIEW] Reading JSON files from: %s", bucket_key)
+
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][BRONZE_OVERVIEW_SKIP] S3 partition path does not exist: %s. Returning empty DataFrame.", bucket_key)
+            return self.spark.createDataFrame([], schema=stock_overview_schema)
 
         try:
             df = (
@@ -382,6 +413,10 @@ class StockDataExtractor:
         bucket_key = self._silver_bucket_key(dataset, "parquet", execution_start_time)
         logger.info("[EXTRACT][SILVER_DAILY_PARQUET] Reading Parquet files from: %s", bucket_key)
 
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][SILVER_DAILY_PARQUET_SKIP] S3 partition path does not exist: %s.", bucket_key)
+            raise FileNotFoundError(f"Path does not exist: {bucket_key}")
+
         try:
             df = self.spark.read.format("parquet").load(bucket_key)
             logger.info("[EXTRACT][SILVER_DAILY_PARQUET_OK] Extraction completed.")
@@ -407,6 +442,10 @@ class StockDataExtractor:
         """
         bucket_key = self._silver_bucket_key(dataset, data_format, execution_start_time)
         logger.info("[EXTRACT][SILVER_DAILY_CSV] Reading CSV files from: %s", bucket_key)
+
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][SILVER_DAILY_CSV_SKIP] S3 partition path does not exist: %s.", bucket_key)
+            raise FileNotFoundError(f"Path does not exist: {bucket_key}")
 
         try:
             df = (
@@ -438,6 +477,10 @@ class StockDataExtractor:
         bucket_key = self._silver_bucket_key(dataset, "parquet", execution_start_time)
         logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET] Reading Parquet files from: %s", bucket_key)
 
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][SILVER_OVERVIEW_PARQUET_SKIP] S3 partition path does not exist: %s.", bucket_key)
+            raise FileNotFoundError(f"Path does not exist: {bucket_key}")
+
         try:
             df = self.spark.read.format("parquet").load(bucket_key)
             logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET_OK] Extraction completed.")
@@ -463,6 +506,10 @@ class StockDataExtractor:
         """
         bucket_key = self._silver_bucket_key(dataset, data_format, execution_start_time)
         logger.info("[EXTRACT][SILVER_OVERVIEW_CSV] Reading CSV files from: %s", bucket_key)
+
+        if not self._path_exists(bucket_key):
+            logger.warning("[EXTRACT][SILVER_OVERVIEW_CSV_SKIP] S3 partition path does not exist: %s.", bucket_key)
+            raise FileNotFoundError(f"Path does not exist: {bucket_key}")
 
         try:
             df = (
