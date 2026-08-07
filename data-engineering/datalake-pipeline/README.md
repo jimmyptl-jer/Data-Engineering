@@ -415,7 +415,7 @@ Automated S3 lifecycle management for cost optimization across data tiers:
                                S3 TIERING
 ┌──────────────┐     30 Days    ┌──────────────┐    90 Days    ┌──────────────┐
 │ S3 Standard  │ ─────────────► │ Standard-IA  │ ────────────► │ S3 Glacier   │
-│ (Active Bronze│                │ (Infrequent  │               │ (Archived    │
+│ (Active Bronze│               │ (Infrequent  │               │ (Archived    │
 │  Silver/Gold)│                │  Raw Data)   │               │  Hist Data)  │
 └──────────────┘                └──────────────┘               └──────────────┘
 ```
@@ -699,7 +699,7 @@ Configured with [`template.yaml`](template.yaml) using AWS SAM.
           ▼                                              ▼                                              ▼
  ┌────────────────────┐                        ┌────────────────────┐                        ┌────────────────────┐
  │ TIME_SERIES_DAILY  │                        │ COMPANY_OVERVIEW   │                        │ TIME_SERIES_WEEKLY │
- │        ✅           │                        │        🔄          │                        │        🚧          │
+ │        ✅          │                        │        🔄          │                        │        🚧          │
  └────────────────────┘                        └────────────────────┘                        └────────────────────┘
           │                                              │                                              │
           └───────────────────────────────┬──────────────┴──────────────────────────────────────────────┘

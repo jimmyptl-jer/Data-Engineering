@@ -17,6 +17,7 @@ Supports execution both as a local standalone script and as an AWS Lambda handle
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
@@ -239,23 +240,11 @@ class StockPipeline:
         Args:
             stock_symbols: List of stock ticker symbols (e.g., ['IBM', 'AAPL']).
             execution_start_time: Pipeline execution timestamp.
-            full_load: If True, forces outputsize='full' for complete historical load.
 
         Returns:
             List of dictionary results summarizing ingestion outcomes per symbol & function.
         """
         logger.info("[INGEST] Starting API ingestion cycle for %d symbol(s).", len(stock_symbols))
-
-        daily_dataset = config.get_dataset_name_by_function("TIME_SERIES_DAILY")
-        watermark_exists = self.watermark_manager.watermark_exists("bronze_to_silver", daily_dataset)
-
-        # Determine payload size: full (20+ years history) if initial run or requested, compact (last 100 days) if incremental
-        if full_load or not watermark_exists:
-            outputsize = "full"
-            logger.info("[INGEST] Mode: FULL LOAD (outputsize='full' — 20+ years historical data).")
-        else:
-            outputsize = "compact"
-            logger.info("[INGEST] Mode: INCREMENTAL LOAD (outputsize='compact' — last 100 days data).")
 
         results = []
 
@@ -270,13 +259,11 @@ class StockPipeline:
                         function=function,
                         dataset=dataset,
                         execution_start_time=execution_start_time,
-                        outputsize=outputsize,
                     )
 
                     results.append({
                         "symbol": symbol,
                         "function": function,
-                        "outputsize": outputsize if "TIME_SERIES" in function else "N/A",
                         "response": response,
                     })
 
@@ -513,78 +500,86 @@ class StockPipeline:
 
         logger.info("[GOLD] Starting Gold layer build from Silver datasets.")
 
-        # 1. Parquet Path: Read Silver Parquet inputs
-        logger.info("[GOLD] Extracting Silver Parquet DataFrames.")
+        try:
+            # 1. Parquet Path: Read Silver Parquet inputs
+            logger.info("[GOLD] Extracting Silver Parquet DataFrames.")
 
-        daily_parquet = self.extractor.extract_silver_daily_data_parquet(
-            daily_dataset, execution_start_time=execution_start_time,
-        )
-        overview_parquet = self.extractor.extract_silver_overview_data_parquet(
-            overview_dataset, execution_start_time=execution_start_time,
-        )
+            daily_parquet = self.extractor.extract_silver_daily_data_parquet(
+                daily_dataset, execution_start_time=execution_start_time,
+            )
+            overview_parquet = self.extractor.extract_silver_overview_data_parquet(
+                overview_dataset, execution_start_time=execution_start_time,
+            )
 
-        # Select business columns and avoid duplicate metadata timestamps
-        daily_parquet = daily_parquet.select(
-            "symbol", "day_date",
-            "open", "high", "low", "close", "volume",
-            "daily_change", "daily_change_percentage", "market_movement",
-            "thirty_day_avg_open", "thirty_day_avg_close",
-            "all_time_high", "all_time_low",
-            "processed_at",
-        )
+            # Select business columns and avoid duplicate metadata timestamps
+            daily_parquet = daily_parquet.select(
+                "symbol", "day_date",
+                "open", "high", "low", "close", "volume",
+                "daily_change", "daily_change_percentage", "market_movement",
+                "thirty_day_avg_open", "thirty_day_avg_close",
+                "all_time_high", "all_time_low",
+                "processed_at",
+            )
 
-        overview_parquet = overview_parquet.drop("processed_at")
+            overview_parquet = overview_parquet.drop("processed_at")
 
-        # Perform Left Outer Join on stock symbol
-        gold_parquet_df = daily_parquet.join(
-            overview_parquet, on="symbol", how="left",
-        )
+            # Perform Left Outer Join on stock symbol
+            gold_parquet_df = daily_parquet.join(
+                overview_parquet, on="symbol", how="left",
+            )
 
-        # 2. CSV Path: Read Silver CSV inputs
-        logger.info("[GOLD] Extracting Silver CSV DataFrames.")
+            # 2. CSV Path: Read Silver CSV inputs
+            logger.info("[GOLD] Extracting Silver CSV DataFrames.")
 
-        daily_csv = self.extractor.extract_silver_daily_data_csv(
-            daily_dataset, "csv", execution_start_time=execution_start_time,
-        )
-        overview_csv = self.extractor.extract_silver_overview_data_csv(
-            overview_dataset, "csv", execution_start_time=execution_start_time,
-        )
+            daily_csv = self.extractor.extract_silver_daily_data_csv(
+                daily_dataset, "csv", execution_start_time=execution_start_time,
+            )
+            overview_csv = self.extractor.extract_silver_overview_data_csv(
+                overview_dataset, "csv", execution_start_time=execution_start_time,
+            )
 
-        daily_csv = daily_csv.select(
-            "symbol", "day_date",
-            "open", "high", "low", "close", "volume",
-            "daily_change", "daily_change_percentage", "market_movement",
-            "thirty_day_avg_open", "thirty_day_avg_close",
-            "all_time_high", "all_time_low",
-            "processed_at",
-        )
+            daily_csv = daily_csv.select(
+                "symbol", "day_date",
+                "open", "high", "low", "close", "volume",
+                "daily_change", "daily_change_percentage", "market_movement",
+                "thirty_day_avg_open", "thirty_day_avg_close",
+                "all_time_high", "all_time_low",
+                "processed_at",
+            )
 
-        overview_csv = overview_csv.drop("processed_at")
+            overview_csv = overview_csv.drop("processed_at")
 
-        gold_csv_df = daily_csv.join(
-            overview_csv, on="symbol", how="left",
-        )
+            gold_csv_df = daily_csv.join(
+                overview_csv, on="symbol", how="left",
+            )
 
-        # 3. Write Gold Layer Outputs
-        logger.info("[GOLD] Writing Gold layer dataset (CSV & Parquet).")
+            # 3. Write Gold Layer Outputs
+            logger.info("[GOLD] Writing Gold layer dataset (CSV & Parquet).")
 
-        _write_silver_csv(
-            gold_csv_df,
-            self.gold_base_path,
-            "company_dataset",
-            execution_start_time=execution_start_time,
-        )
+            _write_silver_csv(
+                gold_csv_df,
+                self.gold_base_path,
+                "company_dataset",
+                execution_start_time=execution_start_time,
+            )
 
-        logger.info("[GOLD] CSV write completed for dataset=company_dataset.")
+            logger.info("[GOLD] CSV write completed for dataset=company_dataset.")
 
-        _write_silver_parquet(
-            gold_parquet_df,
-            self.gold_base_path,
-            "company_dataset",
-            execution_start_time=execution_start_time,
-        )
+            _write_silver_parquet(
+                gold_parquet_df,
+                self.gold_base_path,
+                "company_dataset",
+                execution_start_time=execution_start_time,
+            )
 
-        logger.info("[GOLD] Parquet write completed for dataset=company_dataset.")
+            logger.info("[GOLD] Parquet write completed for dataset=company_dataset.")
+
+        except Exception as e:
+            logger.warning(
+                "[GOLD_SKIP] Silver path not found or empty for execution batch timestamp (%s). Skipping Gold build: %s",
+                execution_start_time.isoformat(),
+                e,
+            )
 
     # ============================================================
     # PIPELINE ORCHESTRATOR
@@ -598,7 +593,7 @@ class StockPipeline:
     ) -> list[dict]:
         """
         Execute the full end-to-end Medallion ETL pipeline:
-          1. API Ingestion -> Bronze S3 JSON (Full load on initial run or if full_load=True, Incremental load otherwise)
+          1. API Ingestion -> Bronze S3 JSON
           2. Bronze -> Silver Daily processing (date-based watermark)
           3. Bronze -> Silver Overview processing (hash-based change detection)
           4. Gold dataset construction (Daily + Overview join)
@@ -606,12 +601,11 @@ class StockPipeline:
         Args:
             execution_start_time: UTC execution timestamp.
             stock_symbols: List of stock symbols to process.
-            full_load: If True, forces outputsize='full' on Bronze ingestion for complete 20+ year history.
 
         Returns:
             List of ingestion result dictionaries.
         """
-        logger.info("[PIPELINE] Starting end-to-end ETL execution (full_load=%s).", full_load)
+        logger.info("[PIPELINE] Starting end-to-end ETL execution.")
 
         batch_id = f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
 
@@ -620,7 +614,6 @@ class StockPipeline:
             results = self._ingest_from_api(
                 stock_symbols,
                 execution_start_time,
-                full_load=full_load,
             )
 
             # Step 2: Bronze -> Silver Daily Time Series
@@ -648,7 +641,6 @@ class StockPipeline:
                 " Execution Time  : %s\n"
                 " Duration        : %.2f seconds\n"
                 " Target Symbols  : %s\n"
-                " Load Mode       : %s\n"
                 " API Results     : %d Successful, %d Failed\n"
                 " Silver Daily    : %s\n"
                 " Silver Overview : %s\n"
@@ -658,7 +650,6 @@ class StockPipeline:
                 execution_start_time.isoformat(),
                 duration,
                 stock_symbols,
-                "FULL LOAD (20+ Years History)" if full_load else "INCREMENTAL LOAD (Last 100 Days)",
                 successful_count,
                 failed_count,
                 "WRITTEN (New Records Found)" if daily_written else "SKIPPED (No New Records)",
@@ -681,14 +672,8 @@ def lambda_handler(event, context):
     """
     AWS Lambda handler entry point.
 
-    Accepts an event payload containing optional `stock_symbols` and `full_load` flag.
-    Also checks `FULL_LOAD` environment variable if not passed in event payload.
-
-    Sample Event Payload:
-      {
-        "stock_symbols": ["IBM", "AAPL"],
-        "full_load": true
-      }
+    Accepts an event payload containing optional `stock_symbols`.
+    Defaults to `stock_symbols=["IBM"]` if not specified.
 
     Args:
         event: Dict containing invocation event details.
@@ -707,17 +692,12 @@ def lambda_handler(event, context):
     is_dict = isinstance(event, dict)
     stock_symbols = event.get("stock_symbols", ["IBM"]) if is_dict else ["IBM"]
 
-    # Check event dict first, fall back to FULL_LOAD environment variable
-    env_full_load = os.getenv("FULL_LOAD", "false").lower() in ("true", "1", "yes")
-    full_load = bool(event.get("full_load", env_full_load)) if is_dict else env_full_load
-
     try:
         stock_pipeline = StockPipeline()
 
         results = stock_pipeline.run(
             execution_start_time=execution_start_time,
             stock_symbols=stock_symbols,
-            full_load=full_load,
         )
 
         successful = [r["symbol"] for r in results if "error" not in r]
@@ -764,12 +744,10 @@ def lambda_handler(event, context):
 # ============================================================
 
 if __name__ == "__main__":
-    import os
-    env_full_load = os.getenv("FULL_LOAD", "false").lower() in ("true", "1", "yes")
-    logger.info("[LOCAL] Executing Stock Data Pipeline locally (FULL_LOAD=%s).", env_full_load)
+    logger.info("[LOCAL] Executing Stock Data Pipeline locally.")
 
     try:
-        lambda_handler({"full_load": env_full_load}, {})
+        lambda_handler({}, {})
         logger.info("[LOCAL] Execution completed successfully.")
 
     except Exception as e:
