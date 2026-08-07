@@ -1,6 +1,6 @@
 # Alpha Vantage Data Lake Pipeline
 
-> **Enterprise Medallion Architecture** — A production-grade Bronze → Silver → Gold data lake pipeline built with PySpark, AWS S3, and Alpha Vantage market data APIs.
+> **Enterprise Medallion Architecture** — A production-grade Bronze → Silver → Gold data lake pipeline built with PySpark, AWS S3, AWS Lambda, and Alpha Vantage market data APIs.
 
 Part of the **90-Day Data Engineering Roadmap**.
 
@@ -13,6 +13,23 @@ Part of the **90-Day Data Engineering Roadmap**.
 - [Technology Stack](#technology-stack)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+- [Enterprise Architecture Layers](#enterprise-architecture-layers)
+  - [1. Data Quality Layer](#1-data-quality-layer-)
+  - [2. Metadata & Audit Layer](#2-metadata--audit-layer-)
+  - [3. Monitoring & Alerting Layer](#3-monitoring--alerting-layer-)
+  - [4. Scheduler & Orchestration Layer](#4-scheduler--orchestration-layer-)
+  - [5. Configuration Layer](#5-configuration-layer-)
+  - [6. Security & Governance Layer](#6-security--governance-layer-)
+  - [7. Storage Formats & Rationale](#7-storage-formats--rationale-)
+  - [8. Streaming Layer (Placeholder)](#8-streaming-layer-placeholder-)
+  - [9. Processing Engine Internal Architecture](#9-processing-engine-internal-architecture-)
+  - [10. Data Consumers & Downstream Layer](#10-data-consumers--downstream-layer-)
+  - [11. Storage Lifecycle Policies](#11-storage-lifecycle-policies-)
+  - [12. CI/CD Pipeline](#12-cicd-pipeline-)
+  - [13. Testing Layer](#13-testing-layer-)
+  - [14. Structured Logging Framework](#14-structured-logging-framework-)
+  - [15. Pipeline Statistics & Metrics Collector](#15-pipeline-statistics--metrics-collector-)
+  - [16. Data Catalog Layer](#16-data-catalog-layer-)
 - [Module Reference](#module-reference)
   - [Ingestion Layer](#ingestion-layer)
   - [Extract Layer](#extract-layer)
@@ -29,8 +46,9 @@ Part of the **90-Day Data Engineering Roadmap**.
   - [Hash-Based Change Detection (Company Overview)](#hash-based-change-detection-company-overview)
 - [Watermark Storage](#watermark-storage)
 - [Pipeline Execution Flow](#pipeline-execution-flow)
+- [Implementation Deep-Dive](#implementation-deep-dive)
 - [AWS Lambda Deployment](#aws-lambda-deployment)
-- [Enterprise Architecture Diagram](#enterprise-architecture-diagram)
+- [Master Enterprise Architecture Diagram](#master-enterprise-architecture-diagram)
 - [Current Status](#current-status)
 - [Roadmap](#roadmap)
 
@@ -101,7 +119,8 @@ datalake-pipeline/
 ├── .env.example                      # Environment variable template
 ├── .gitignore
 ├── requirements.txt                  # Production dependencies
-└── requirements-dev.txt              # Dev/test dependencies
+├── requirements-dev.txt              # Dev/test dependencies
+└── template.yaml                     # AWS SAM Infrastructure as Code template
 ```
 
 ---
@@ -110,10 +129,12 @@ datalake-pipeline/
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Processing Engine** | PySpark 4.0 | Distributed data processing |
+| **Processing Engine** | PySpark 4.0 | Distributed data processing & Catalyst optimization |
 | **Cloud Storage** | AWS S3 | Data lake storage (Bronze/Silver/Gold) |
 | **Data Source** | Alpha Vantage API | Financial market data |
 | **Cloud Compute** | AWS Lambda | Serverless pipeline execution |
+| **Orchestration** | AWS EventBridge | Time-based cron scheduling |
+| **IaC** | AWS SAM | Infrastructure as Code |
 | **S3 Client** | boto3 | Bronze layer writes |
 | **Language** | Python 3.9+ | Core development |
 | **Config** | python-dotenv | Environment variable management |
@@ -175,17 +196,298 @@ The pipeline supports up to 16 API keys for rotation (`ALPHA_VANTAGE_API_KEY` th
 python -m src.stock_pipeline.app
 ```
 
-### 4. Run as Lambda
+---
 
-The `lambda_handler` function accepts an event with optional `stock_symbols`:
+## Enterprise Architecture Layers
 
-```json
-{
-  "stock_symbols": ["IBM", "AAPL", "MSFT"]
-}
+Production data platforms require robust governance, quality checks, observability, and security. Below are the 16 core architectural layers designed into this pipeline.
+
+---
+
+### 1. Data Quality Layer ⭐⭐⭐⭐⭐
+
+Validation is treated as a dedicated architectural boundary to ensure dirty data is quarantined rather than corrupting Silver/Gold layers.
+
+```text
+                SILVER TRANSFORMATION
+                        │
+                        ▼
+══════════════════════════════════════════════════════
+                DATA QUALITY LAYER
+══════════════════════════════════════════════════════
+  • Schema Validation (Explicit StructType)
+  • Required Field Check (symbol, day_date, close, etc.)
+  • Duplicate Detection (dropDuplicates on business keys)
+  • Business Rule Validation (high >= low, open/close > 0)
+  • Null / Fake Null Normalization ("", "n/a", "-", "null")
+  • Range & Constraint Checks (volume >= 0)
+  • Quarantine Invalid Records (validation_status = INVALID)
+  • Data Quality Metrics Collection
 ```
 
-Defaults to `["IBM"]` if not provided.
+**Quality Checks Breakdown:**
+1. **Schema Integrity:** Enforces explicit Spark schemas on raw read to catch structural breaking changes from upstream APIs.
+2. **Fake Null Normalization:** Converts string placeholders (`"n/a"`, `"none"`, `"-"`, `""`) to Spark `NULL`.
+3. **Business Assertions:**
+   - Price check: `open > 0`, `high > 0`, `low > 0`, `close > 0`
+   - Bound check: `high >= low`
+   - Volume check: `volume >= 0`
+4. **Quarantine Pattern:** Rows failing validation are flagged with `validation_status = 'INVALID'` and tagged with `validation_reason` for auditing rather than silently dropped.
+
+*Future Enhancements:* Integration with **Great Expectations**, **AWS Deequ**, and **Soda Core** for automated assertion suites.
+
+---
+
+### 2. Metadata & Audit Layer ⭐⭐⭐⭐⭐
+
+Maintains system auditability, lineage, and incremental state across pipeline runs.
+
+```text
+                Metadata Repository
+─────────────────────────────────────────────────────
+  • Watermarks          (Last processed dates & content hashes)
+  • Pipeline Runs       (Execution timestamps, durations, exit status)
+  • Batch History       (Unique batch_id per invocation)
+  • Schema Versions     (Explicit Spark StructTypes)
+  • Audit Logs          (Structured CloudWatch log entries)
+```
+
+**Tracked Metadata Attributes:**
+- `pipeline_name`: e.g., `bronze_to_silver`
+- `dataset_name`: e.g., `daily_time_series`, `company_overview`
+- `watermark_column`: e.g., `day_date` or `overview_hash`
+- `watermark_value`: Max date string or SHA-256 digest
+- `batch_id`: Timestamped execution token (e.g. `batch_20260807_033000`)
+- `last_processed_at`: UTC timestamp of execution start
+- `updated_by`: Subsystem identifier (`stock_pipeline`)
+
+---
+
+### 3. Monitoring & Alerting Layer ⭐⭐⭐⭐
+
+Ensures real-time observability and instant notification of pipeline anomalies or failures.
+
+```text
+Pipeline Run ──▶ CloudWatch Logs ──▶ CloudWatch Metrics ──▶ Alarms ──▶ SNS / Email / Slack
+```
+
+**Configured Alarms & Metrics:**
+- **Error Alarm:** Triggers when `Errors >= 1` within a 5-minute period.
+- **Duration Warning Alarm:** Triggers when execution exceeds 12 minutes (720,000 ms), alerting before Lambda's 15-minute hard limit.
+- **API Failure Monitoring:** Logs HTTP status codes, connection errors, and rate-limit notices.
+- **Watermark Progress:** Tracks watermark progression per batch.
+
+---
+
+### 4. Scheduler & Orchestration Layer ⭐⭐⭐⭐
+
+Automates pipeline execution on a deterministic schedule.
+
+```text
+Amazon EventBridge (Cron) ──▶ AWS Lambda ──▶ StockPipeline.run()
+```
+
+- **Current Implementation:** EventBridge rule configured to trigger daily at `cron(0 14 ? * MON-FRI *)` (2:00 PM UTC, post US market close).
+- **Roadmap Integration:**
+  ```text
+  Apache Airflow ──▶ AWS EMR / AWS Glue ──▶ PySpark Pipeline
+  ```
+
+---
+
+### 5. Configuration Layer ⭐⭐⭐⭐⭐
+
+Decouples environment-specific parameters from business logic.
+
+```text
+Configuration Strategy
+┌──────────────┐     ┌──────────────┐     ┌──────────────────────┐     ┌───────────┐
+│  config.py   │ ◄───│  .env File   │ ◄───│ AWS Secrets Manager  │ ◄───│ IAM Roles │
+└──────────────┘     └──────────────┘     └──────────────────────┘     └───────────┘
+```
+
+- `src/stock_pipeline/config.py`: Centralized endpoint mapping, watermark strategies, and S3 URI prefixes.
+- `src/watermark/config.py`: Watermark storage paths.
+- `.env`: Local development key store.
+- AWS Secrets Manager / Parameter Store (Production target).
+
+---
+
+### 6. Security & Governance Layer ⭐⭐⭐⭐
+
+Enforces least-privilege access and data protection principles.
+
+```text
+                       SECURITY FRAMEWORK
+┌─────────────────────────────────────────────────────────────┐
+│  • IAM Roles: Scoped execution policies (S3 CRUD only)      │
+│  • AWS Credentials: IAM role assumption (no hardcoded keys) │
+│  • S3 Bucket Policies: Block Public Access enabled          │
+│  • Encryption: SSE-S3 (AES-256) at-rest encryption          │
+│  • Secret Management: API keys passed securely via Lambda   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 7. Storage Formats & Rationale ⭐⭐⭐⭐
+
+The Silver and Gold layers store data in dual formats to serve distinct read patterns:
+
+```text
+Silver & Gold Storage
+        │
+        ├── CSV Format
+        │     ├── Purpose: Human readable, ad-hoc inspection, legacy exports
+        │     └── Options: header=True
+        │
+        └── Parquet Format
+              ├── Purpose: High-performance analytical queries, Athena / Spark
+              ├── Columnar Storage: Enables projection pushdown (read subset of columns)
+              ├── Compression: Snappy compressed for reduced S3 footprint and I/O
+              └── Schema Preservation: Native data types preserved without parsing
+```
+
+---
+
+### 8. Streaming Layer (Placeholder) ⭐⭐⭐⭐⭐
+
+Designed to seamlessly accommodate real-time streaming alongside batch processing.
+
+```text
+                                STREAMING ARCHITECTURE
+┌───────────────────┐        ┌───────────────────┐        ┌───────────────────┐
+│  REST API / WS    │ ────►  │ Confluent Kafka   │ ────►  │ Spark Streaming   │ ──► Bronze
+│ (Real-time Ticks) │        │ (Topic: market)   │        │ / AWS Kinesis     │
+└───────────────────┘        └───────────────────┘        └───────────────────┘
+```
+
+---
+
+### 9. Processing Engine Internal Architecture ⭐⭐⭐⭐⭐
+
+Detailed representation of PySpark's execution engine during pipeline runs:
+
+```text
+                          PYSPARK ENGINE INTERNALS
+┌───────────────────────────────────────────────────────────────────────────┐
+│                             Spark Driver                                  │
+│   (StockPipeline orchestrator, DataFrame API calls, DAG construction)      │
+└─────────────────────────────────────┬─────────────────────────────────────┘
+                                      │ Catalyst Optimizer
+                                      ▼ (Logical → Physical Plan)
+┌───────────────────────────────────────────────────────────────────────────┐
+│                             DAG Scheduler                                 │
+│                   (Stages: Shuffle Read / Write boundaries)               │
+└─────────────────────────────────────┬─────────────────────────────────────┘
+                                      │ Task Execution
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                           Spark Executors                                 │
+│        (Distributed transformation tasks, partitions, memory buffers)     │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 10. Data Consumers & Downstream Layer ⭐⭐⭐⭐⭐
+
+Extends the Gold layer into downstream operational, analytical, and machine learning applications:
+
+```text
+                               GOLD CONSUMERS
+                                     │
+      ┌────────────────┬─────────────┼──────────────┬───────────────┐
+      ▼                ▼             ▼              ▼               ▼
+┌───────────┐   ┌────────────┐  ┌───────────┐  ┌───────────┐  ┌─────────────┐
+│ AWS Athena│   │ Redshift   │  │ Power BI  │  │ ML Models │  │ REST APIs   │
+│ (Ad-hoc)  │   │ (Data Whse)│  │ (BI Dash) │  │ (Predict) │  │ (Export)    │
+└───────────┘   └────────────┘  └───────────┘  └───────────┘  └─────────────┘
+```
+
+---
+
+### 11. Storage Lifecycle Policies ⭐⭐⭐⭐
+
+Automated S3 lifecycle management for cost optimization across data tiers:
+
+```text
+                               S3 TIERING
+┌──────────────┐     30 Days    ┌──────────────┐    90 Days    ┌──────────────┐
+│ S3 Standard  │ ─────────────► │ Standard-IA  │ ────────────► │ S3 Glacier   │
+│ (Active Bronze│                │ (Infrequent  │               │ (Archived    │
+│  Silver/Gold)│                │  Raw Data)   │               │  Hist Data)  │
+└──────────────┘                └──────────────┘               └──────────────┘
+```
+
+---
+
+### 12. CI/CD Pipeline ⭐⭐⭐⭐
+
+Automated build, test, and deployment workflow using GitHub Actions and AWS SAM:
+
+```text
+GitHub Push ──► GitHub Actions ──► Pytest & Flake8 ──► SAM Build ──► SAM Deploy ──► AWS Lambda
+```
+
+---
+
+### 13. Testing Layer ⭐⭐⭐⭐
+
+Ensures code quality and transformation correctness prior to deployment:
+
+```text
+                           TESTING SUITE
+┌─────────────────────────────────────────────────────────────────────────┐
+│ • Unit Tests: Test utility functions, APIKeyManager, path builders      │
+│ • Integration Tests: Test Spark transformations with mock DataFrames    │
+│ • Pipeline End-to-End Tests: Local execution against sample JSON payloads│
+│ • Static Analysis: Flake8 linting & Black formatting checks             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 14. Structured Logging Framework ⭐⭐⭐⭐⭐
+
+Centralized, prefixed logging for operational transparency:
+
+```text
+ETL Step ──► Python Logging Engine ──► CloudWatch Stream ──► Operational Dashboard
+```
+
+Log entry format: `[LAYER][ACTION] Message`
+- Example: `[TRANSFORM][DAILY_START] Starting daily time-series transformation.`
+- Example: `[WATERMARK][READ_OK] Watermark read successfully for dataset=daily_time_series.`
+
+---
+
+### 15. Pipeline Statistics & Metrics Collector ⭐⭐⭐⭐⭐
+
+Operational metrics collected per pipeline execution:
+
+```text
+                      PIPELINE METRICS PAYLOAD
+┌─────────────────────────────────────────────────────────────────────────┐
+│ • Rows Read from Bronze                                                 │
+│ • Rows Written to Silver (Valid)                                        │
+│ • Rows Rejected (Quarantined Invalid)                                   │
+│ • API Calls Made & Response Status Codes                                │
+│ • Processing Duration (Seconds)                                         │
+│ • Watermark Old vs New Values                                           │
+│ • Output Partition File Counts                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 16. Data Catalog Layer ⭐⭐⭐
+
+Automated schema discovery and metastore cataloging:
+
+```text
+Silver / Gold S3 ──► AWS Glue Crawler ──► Glue Data Catalog ──► Athena / Redshift Spectrum
+```
 
 ---
 
@@ -208,8 +510,6 @@ class AlphaVantageIngestion:
         """Fetch from API → validate → upload to S3 Bronze."""
 ```
 
-**Error detection:** Checks for `Information`, `Note`, and `Error Message` keys in the API response to catch rate-limit errors before they pollute the Bronze layer.
-
 ---
 
 ### Extract Layer
@@ -228,8 +528,6 @@ Reads data from S3 into Spark DataFrames using explicit schemas:
 | `extract_silver_overview_data_parquet()` | Silver | Parquet |
 | `extract_silver_overview_data_csv()` | Silver | CSV |
 
-**Schema enforcement:** Bronze extractors use explicit `StructType` schemas (not `inferSchema`) for type safety and performance.
-
 ---
 
 ### Transform Layer
@@ -242,40 +540,9 @@ Transforms raw Bronze DataFrames into clean, validated, enriched Silver DataFram
 
 `silver_transform_daily_timeseries(daily_dataset, data_df, watermark_value=None)`
 
-Pipeline steps:
-
-| Step | Operation |
-|------|-----------|
-| 1 | Flatten nested JSON (explode `Time Series (Daily)`) |
-| 2 | Select and rename columns |
-| 3 | Watermark filter (if `watermark_value` provided) |
-| 4 | Trim whitespace, normalize fake nulls (`"n/a"`, `"none"`, `"-"`, etc.) |
-| 5 | Cast types (date, double, long) |
-| 6 | Data quality validation (flag `VALID` / `INVALID`) |
-| 7 | Add validation reason for invalid records |
-| 8 | Filter valid records, count invalids |
-| 9 | Deduplicate on `(symbol, day_date)` |
-| 10 | Round price columns to 2 decimals |
-| 11 | Enrich: `daily_change`, `daily_change_percentage`, `market_movement` |
-| 12 | Compute 30-day rolling averages (open/close) |
-| 13 | Compute 52-week high/low |
-| 14 | Compute all-time high/low |
-| 15 | Add partition metadata (`year`, `month`, `day`) |
-| 16 | Final column selection and ordering |
-
 #### Company Overview Transform
 
 `silver_transform_overview(data_df)`
-
-| Step | Operation |
-|------|-----------|
-| 1 | Select 52 business columns |
-| 2 | Trim strings, normalize fake nulls |
-| 3 | Fill defaults (`Country="Unknown"`, `Sector="Unknown"`, etc.) |
-| 4 | Cast to proper types (integer, long, double, date) |
-| 5 | Add partition metadata |
-| 6 | Rename all columns to snake_case (e.g., `MarketCapitalization` → `market_cap`) |
-| 7 | Add `processed_at` timestamp |
 
 ---
 
@@ -284,14 +551,6 @@ Pipeline steps:
 **File:** [`load.py`](src/stock_pipeline/load.py)
 
 Handles S3 uploads for the Bronze layer using `boto3.client('s3').put_object()`.
-
-```python
-class StockDataLoader:
-    def upload_raw_to_s3(self, data, bucket_name, stock_symbol, bucket_key):
-        """Serialize JSON and upload to S3 Bronze."""
-```
-
-Silver and Gold writes use Spark's native `df.write.parquet()` / `df.write.csv()` directly (see `_write_silver_parquet()` and `_write_silver_csv()` in `app.py`).
 
 ---
 
@@ -308,37 +567,13 @@ class WatermarkManager:
     def write_watermark(watermark: dict) -> None
 ```
 
-**Key design decisions:**
-
-- Uses the **Hadoop FileSystem API** (via Spark's JVM gateway) for `_path_exists()`, so it works transparently with `s3a://`, `hdfs://`, and `file://` paths.
-- Watermarks are stored as **single-row JSON files** on S3, readable by both Spark and standard JSON parsers.
-- The `write_watermark()` method derives the path from `pipeline_name` and `dataset_name` keys inside the watermark dict — a single method handles both create and update.
-
 ---
 
 ### Configuration
 
 **File:** [`config.py`](src/stock_pipeline/config.py)
 
-Centralized pipeline settings:
-
-```python
-ALPHA_VANTAGE_ENDPOINTS = [
-    {"function": "TIME_SERIES_DAILY", "dataset": "daily_time_series"},
-    {"function": "OVERVIEW",          "dataset": "company_overview"},
-]
-
-WATERMARK_STRATEGIES = {
-    "daily_time_series": "date_based",
-    "company_overview":  "hash_based",
-}
-```
-
-| Setting | Value |
-|---------|-------|
-| `SILVER_BASE_PATH` | `s3a://graywolf--data--lake/stock/silver/source=alphavantage/` |
-| `GOLD_BASE_PATH` | `s3a://graywolf--data--lake/stock/gold/source=alphavantage/` |
-| `WATERMARK_BASE_PATH` | `s3a://graywolf--data--lake/watermark/` |
+Centralized pipeline settings and endpoint mapping.
 
 ---
 
@@ -348,22 +583,7 @@ WATERMARK_STRATEGIES = {
 
 **Path:** `s3://graywolf--data--lake/stock/bronze/source=alphavantage/`
 
-```
-dataset=daily_time_series/
-  year=2026/month=08/day=07/hour=03/minute=30/
-    IBM.json
-    AAPL.json
-
-dataset=company_overview/
-  year=2026/month=08/day=07/hour=03/minute=30/
-    IBM.json
-```
-
-**Characteristics:**
-- ✅ Raw JSON — exactly as returned by the API
-- ✅ Immutable — never modified after landing
-- ✅ Source of truth — all downstream layers can be rebuilt from Bronze
-- ✅ Time-partitioned — supports replay and point-in-time analysis
+Raw, immutable landing zone partition by `year/month/day/hour/minute`.
 
 ---
 
@@ -371,25 +591,7 @@ dataset=company_overview/
 
 **Path:** `s3://graywolf--data--lake/stock/silver/source=alphavantage/`
 
-```
-dataset=daily_time_series/
-  year=2026/month=08/day=07/hour=03/minute=30/
-    format=csv/
-    format=parquet/
-
-dataset=company_overview/
-  year=2026/month=08/day=07/hour=03/minute=30/
-    format=csv/
-    format=parquet/
-```
-
-**Characteristics:**
-- ✅ Clean, validated data (invalid rows quarantined)
-- ✅ Strong types (double, long, date — not strings)
-- ✅ Snake_case column names
-- ✅ Enriched metrics (daily change %, 30-day averages, 52-week high/low, all-time high/low)
-- ✅ Dual format (CSV for ad-hoc queries, Parquet for analytics)
-- ✅ Metadata columns (`processed_at`, `validation_status`, `year`, `month`, `day`)
+Cleaned, typed, partitioned, enriched dataset written in CSV and Parquet.
 
 ---
 
@@ -397,19 +599,7 @@ dataset=company_overview/
 
 **Path:** `s3://graywolf--data--lake/stock/gold/source=alphavantage/`
 
-```
-dataset=company_dataset/
-  year=2026/month=08/day=07/hour=03/minute=30/
-    format=csv/
-    format=parquet/
-```
-
-The Gold layer joins **Daily Time Series** + **Company Overview** on the `symbol` column to produce an analytics-ready dataset combining price action with company fundamentals.
-
-```
-Daily (price, volume, change %)  LEFT JOIN  Overview (sector, PE ratio, market cap)
-           ON symbol = symbol
-```
+Joined business dataset combining price action with company fundamentals.
 
 ---
 
@@ -417,50 +607,11 @@ Daily (price, volume, change %)  LEFT JOIN  Overview (sector, PE ratio, market c
 
 ### Date-Based Watermark (Daily Time Series)
 
-For **transactional / time-series data** that grows over time.
-
-```text
-Bronze Extract
-    ↓
-Read Watermark → get last day_date
-    ↓
-Filter: day_date > watermark_value
-    ↓
-Transform (only new records)
-    ↓
-┌─── isEmpty? ──┐
-│               │
-YES             NO
-│               │
-Skip            Write Silver (CSV + Parquet)
-                    ↓
-                Update Watermark (new max day_date)
-```
+Processes only records with `day_date > last_watermark`.
 
 ### Hash-Based Change Detection (Company Overview)
 
-For **reference / master data** that is a full snapshot (not append-only).
-
-```text
-Bronze Extract
-    ↓
-Silver Transform
-    ↓
-Compute SHA-256 of business columns
-(exclude: processed_at, batch_id, year, month, day)
-    ↓
-Read Existing Watermark → get stored overview_hash
-    ↓
-Compare Hashes
-    ↓
-┌────────── Same? ──────────┐
-│                           │
-YES                         NO
-│                           │
-Skip Silver write           Write Silver (CSV + Parquet)
-Skip Watermark update       Update Watermark (new hash)
-Log "No changes detected"
-```
+Calculates SHA-256 hash of business columns and compares against stored watermark to skip unchanged snapshots.
 
 ---
 
@@ -468,13 +619,7 @@ Log "No changes detected"
 
 **Path:** `s3://graywolf--data--lake/watermark/bronze_to_silver/`
 
-```
-daily_time_series.json
-company_overview.json
-```
-
-**Watermark Schema:**
-
+Schema:
 ```json
 {
   "pipeline_name": "bronze_to_silver",
@@ -490,20 +635,9 @@ company_overview.json
 }
 ```
 
-**Four verified scenarios:**
-
-| Scenario | Behavior |
-|----------|----------|
-| No watermark exists | Full load → Create watermark |
-| Watermark exists + new data | Incremental load → Update watermark |
-| Watermark exists + no new daily records | Skip Silver write → Keep existing watermark |
-| Watermark exists + overview hash unchanged | Skip Silver write → Keep existing watermark |
-
 ---
 
 ## Pipeline Execution Flow
-
-The `StockPipeline.run()` method orchestrates the full ETL:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
@@ -514,8 +648,8 @@ The `StockPipeline.run()` method orchestrates the full ETL:
 │         ┌────────────────────┼────────────────────┐              │
 │         │                    │                    │              │
 │         ▼                    ▼                    ▼              │
-│  _ingest_from_api()  _process_daily()  _process_overview()       │
-│    (API → Bronze)    (Date Watermark)  (Hash Detection)          │
+│  _ingest_from_api()  _process_daily()  _process_overview()      │
+│    (API → Bronze)    (Date Watermark)  (Hash Detection)         │
 │                              │                    │              │
 │                              └────────┬───────────┘              │
 │                                       │                          │
@@ -524,7 +658,7 @@ The `StockPipeline.run()` method orchestrates the full ETL:
 │                          (Join Daily + Overview)                 │
 │                                       │                          │
 │                                       ▼                          │
-│                              Return Results                      │
+│                              Return Results                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -534,520 +668,192 @@ The `StockPipeline.run()` method orchestrates the full ETL:
 
 ### Pipeline Orchestrator — `StockPipeline` Class
 
-The [`app.py`](src/stock_pipeline/app.py) orchestrator is the heart of the pipeline. It breaks the ETL into **four isolated methods**, each responsible for one concern:
-
-```python
-class StockPipeline:
-    def _ingest_from_api(stock_symbols, execution_start_time) -> list
-    def _process_daily_dataset(execution_start_time, batch_id) -> bool
-    def _process_overview_dataset(execution_start_time, batch_id) -> bool
-    def _build_gold_layer(execution_start_time) -> None
-```
-
-| Method | Responsibility | Returns |
-|--------|---------------|---------|
-| `_ingest_from_api()` | Fetch from Alpha Vantage → upload raw JSON to S3 Bronze | List of result dicts |
-| `_process_daily_dataset()` | Bronze → Silver for daily time series (date-based watermark) | `True` if Silver was written |
-| `_process_overview_dataset()` | Bronze → Silver for company overview (hash-based detection) | `True` if Silver was written |
-| `_build_gold_layer()` | Read Silver → join → write Gold (always runs for consistency) | None |
-
-**Why this design matters:**
-- Each method can be tested independently.
-- A failure in overview processing doesn't block daily processing.
-- Gold layer always rebuilds, ensuring consistency even if only one Silver was updated.
-- Adding a new dataset = adding one new `_process_*()` method.
-
-### Daily Transform — 16-Step Pipeline
-
-The daily transform in [`transform.py`](src/stock_pipeline/transform.py) produces this Silver schema:
-
-```
-root
- |-- symbol: string              ← Stock ticker (e.g., "IBM")
- |-- day_date: date              ← Trading day
- |-- open: double                ← Opening price (rounded 2 decimals)
- |-- high: double                ← Daily high
- |-- low: double                 ← Daily low
- |-- close: double               ← Closing price
- |-- volume: long                ← Trading volume
- |-- daily_change: double        ← close - open (enriched)
- |-- daily_change_percentage: double ← ((close-open)/open)*100 (enriched)
- |-- market_movement: string     ← "Bull" / "Bear" / "Neutral" (enriched)
- |-- thirty_day_avg_open: double ← 30-day rolling average open (enriched)
- |-- thirty_day_avg_close: double← 30-day rolling average close (enriched)
- |-- fifty_two_week_high: double ← 52-week high per symbol (enriched)
- |-- fifty_two_week_low: double  ← 52-week low per symbol (enriched)
- |-- all_time_high: double       ← All-time high per symbol (enriched)
- |-- all_time_low: double        ← All-time low per symbol (enriched)
- |-- last_refreshed_date: date   ← Last API refresh date
- |-- validation_status: string   ← "VALID" or "INVALID"
- |-- validation_reason: string   ← Why a row was flagged invalid
- |-- year: integer               ← Partition key
- |-- month: integer              ← Partition key
- |-- day: integer                ← Partition key
- |-- processed_at: timestamp     ← Pipeline processing timestamp (IST)
-```
-
-**Validation rules applied:**
-- All required fields must be non-null
-- Prices must be > 0
-- Volume must be >= 0
-- High price must be >= low price
-- Invalid records are flagged (not dropped) for quarantine analysis
-
-### Overview Transform — 52 Business Columns
-
-The overview transform renames all Alpha Vantage PascalCase columns to snake_case:
-
-```
-MarketCapitalization → market_cap
-PERatio              → pe_ratio
-52WeekHigh           → fifty_two_week_high
-200DayMovingAverage  → two_hundred_day_moving_average
-```
-
-Type casting groups:
-
-| Type | Columns |
-|------|---------|
-| `IntegerType` | CIK, analyst rating counts (6 columns) |
-| `LongType` | Market cap, EBITDA, revenue, shares outstanding (6 columns) |
-| `DoubleType` | All financial ratios and metrics (28 columns) |
-| `DateType` | Latest quarter, dividend dates (3 columns) |
-| `StringType` | Company identifiers and descriptions (10 columns) |
-
-### Data Quality — Fake Null Normalization
-
-Both transforms normalize "fake null" values that APIs often return:
-
-```python
-fake_null_values = ["", "n/a", "na", "null", "none", "-"]
-```
-
-These are converted to real Spark `null` values so downstream aggregations (averages, counts) are correct.
-
-### S3 Path Convention
-
-All paths follow a consistent hierarchical partition scheme:
-
-```
-s3://graywolf--data--lake/
-  └── stock/
-      ├── bronze/source=alphavantage/dataset={name}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/{SYMBOL}.json
-      ├── silver/source=alphavantage/dataset={name}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/format={csv|parquet}/
-      └── gold/source=alphavantage/dataset={name}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/format={csv|parquet}/
-```
-
-This design supports:
-- **Time-travel queries** — Read any historical partition.
-- **Cost-effective storage** — Prune partitions for targeted scans.
-- **Replay capability** — Re-process from any Bronze snapshot.
-
-### Error Handling Pattern
-
-The pipeline uses a consistent error handling pattern throughout:
-
-```python
-try:
-    # Business logic
-    logger.info("[MODULE][STEP] Description")
-    ...
-    logger.info("[MODULE][STEP_OK] Success message")
-
-except Exception as e:
-    logger.exception("[MODULE][STEP_FAIL] Error: %s", e)
-    raise  # Always re-raise — let the caller decide recovery
-```
-
-**Key principles:**
-- `logger.exception()` (not `logger.error()`) is used to capture full stack traces.
-- Exceptions always re-raise — the pipeline never silently swallows errors.
-- The `lambda_handler` is the single exception boundary that catches, logs duration, and returns error responses.
-
-### Logging Convention
-
-All log messages follow the `[MODULE][ACTION]` prefix pattern:
-
-```
-[EXTRACT][BRONZE_DAILY]    Reading from: s3a://...
-[TRANSFORM][DAILY_START]   Starting daily time-series transformation.
-[SILVER][WRITE_PARQUET_OK] Parquet write completed for dataset=daily_time_series.
-[WATERMARK][READ_OK]       Watermark read successfully for dataset=daily_time_series.
-[PIPELINE]                 Completed successfully. Duration: 42.17 seconds.
-[LAMBDA]                   Execution started at 2026-08-07T03:30:00+00:00
-```
-
-This makes log filtering trivial in CloudWatch:
-- Filter by layer: `[EXTRACT]`, `[TRANSFORM]`, `[SILVER]`, `[GOLD]`
-- Filter by dataset: `daily_time_series`, `company_overview`
-- Filter by outcome: `_OK]`, `_FAIL]`
-
-### API Key Rotation
-
-The pipeline supports **16 concurrent API keys** for Alpha Vantage rate-limit avoidance:
-
-```env
-ALPHA_VANTAGE_API_KEY=key0
-ALPHA_VANTAGE_API_KEY_1=key1
-ALPHA_VANTAGE_API_KEY_2=key2
-...
-ALPHA_VANTAGE_API_KEY_15=key15
-```
-
-Keys are loaded at startup, `None` values (unset env vars) are filtered out, and a random key is selected for each API call. This allows processing multiple symbols without hitting the 5-calls/minute free-tier limit.
-
-### Batch ID Convention
-
-Each pipeline run generates a deterministic batch ID:
-
-```python
-batch_id = f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
-# Example: batch_20260807_033000
-```
-
-This is stored in the watermark and can be used to:
-- Correlate Silver writes with the exact pipeline run that produced them.
-- Debug issues by searching CloudWatch for the batch ID.
-- Identify which Bronze partition was the source for a given Silver output.
+Isolated execution methods:
+- `_ingest_from_api()`
+- `_process_daily_dataset()`
+- `_process_overview_dataset()`
+- `_build_gold_layer()`
 
 ---
 
 ## AWS Lambda Deployment
 
-The pipeline is **AWS Lambda-ready**. The entry point is `lambda_handler(event, context)` in [`app.py`](src/stock_pipeline/app.py).
-
-### Lambda Handler Contract
-
-**Event payload:**
-
-```json
-{
-  "stock_symbols": ["IBM", "AAPL", "MSFT", "NVDA"]
-}
-```
-
-Defaults to `["IBM"]` if `stock_symbols` is not provided in the event.
-
-**Success response:**
-
-```json
-{
-  "statusCode": 200,
-  "body": "Stock pipeline executed successfully.",
-  "results": [
-    {"symbol": "IBM", "function": "TIME_SERIES_DAILY", "response": "..."},
-    {"symbol": "IBM", "function": "OVERVIEW", "response": "..."}
-  ]
-}
-```
-
-**Failure behavior:** Exceptions propagate to AWS Lambda runtime, which handles retries and dead-letter queues.
-
-### SAM Template
-
-Create a `template.yaml` at the project root for AWS SAM deployment:
-
-```yaml
-AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
-Description: Alpha Vantage Data Lake Pipeline
-
-Globals:
-  Function:
-    Timeout: 900          # 15 minutes max for Lambda
-    MemorySize: 3072      # PySpark needs memory
-    Runtime: python3.9
-
-Resources:
-  StockPipelineFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Handler: src.stock_pipeline.app.lambda_handler
-      CodeUri: .
-      Description: Bronze → Silver → Gold ETL pipeline
-      Architectures:
-        - x86_64
-      Environment:
-        Variables:
-          ALPHA_VANTAGE_API_KEY: !Ref AlphaVantageApiKey
-          AWS_S3_BUCKET_NAME: !Ref S3BucketName
-      Policies:
-        - S3CrudPolicy:
-            BucketName: !Ref DataLakeBucket
-      Events:
-        ScheduledRun:
-          Type: Schedule
-          Properties:
-            Schedule: cron(0 14 ? * MON-FRI *)  # 2 PM UTC, weekdays
-            Description: Run after US market close
-            Input: '{"stock_symbols": ["IBM", "AAPL", "MSFT"]}'
-
-  DataLakeBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref S3BucketName
-
-Parameters:
-  AlphaVantageApiKey:
-    Type: String
-    NoEcho: true
-  S3BucketName:
-    Type: String
-    Default: graywolf--data--lake
-
-Outputs:
-  FunctionArn:
-    Description: Lambda function ARN
-    Value: !GetAtt StockPipelineFunction.Arn
-```
-
-### Required IAM Policy
-
-The Lambda execution role needs:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "S3DataLakeAccess",
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:ListBucket",
-        "s3:DeleteObject"
-      ],
-      "Resource": [
-        "arn:aws:s3:::graywolf--data--lake",
-        "arn:aws:s3:::graywolf--data--lake/*"
-      ]
-    }
-  ]
-}
-```
-
-### Environment Variables for Lambda
-
-Set these in the Lambda console or SAM template:
-
-| Variable | Description | Required |
-|----------|------------|----------|
-| `ALPHA_VANTAGE_API_KEY` | Primary API key | ✅ |
-| `ALPHA_VANTAGE_API_KEY_1` through `_15` | Additional rotation keys | Optional |
-| `AWS_ACCESS_KEY_ID` | Auto-provided by Lambda execution role | Auto |
-| `AWS_SECRET_ACCESS_KEY` | Auto-provided by Lambda execution role | Auto |
-| `S3_BUCKET_NAME` | Target S3 bucket name | ✅ |
-
-> **Note:** When running on Lambda, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are automatically injected by the execution role. The pipeline's boto3 client and Spark's S3A connector will use them transparently.
-
-### EventBridge Scheduling
-
-For automated daily runs, configure an EventBridge rule:
-
-```
-Schedule: cron(0 14 ? * MON-FRI *)
-```
-
-This triggers at **2:00 PM UTC** (after US market close) on weekdays.
-
-**Custom event payload:**
-
-```json
-{
-  "stock_symbols": ["IBM", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
-}
-```
-
-### Deploy with SAM CLI
-
-```bash
-# Build
-sam build
-
-# Deploy (guided — first time)
-sam deploy --guided
-
-# Deploy (subsequent runs)
-sam deploy
-
-# Test locally
-sam local invoke StockPipelineFunction \
-  --event '{"stock_symbols": ["IBM"]}'
-
-# View logs
-sam logs -n StockPipelineFunction --tail
-```
-
-### Production Considerations
-
-| Concern | Solution |
-|---------|----------|
-| **Cold start** | PySpark has heavy init (~10-15s). Consider provisioned concurrency for time-sensitive runs. |
-| **Memory** | Set to 3072 MB minimum. PySpark + S3 reads need headroom. |
-| **Timeout** | Set to 900s (15 min max). Multi-symbol runs with Gold joins can take 5-10 min. |
-| **Idempotency** | Silver writes use `mode("overwrite")` — safe to retry without duplicates. |
-| **Secrets** | Use AWS Secrets Manager or SSM Parameter Store for API keys (not env vars) in production. |
-| **Monitoring** | CloudWatch Logs + CloudWatch Alarms on Lambda errors + duration. |
-| **Retries** | Configure Lambda retry policy (max 2 retries) with exponential backoff. |
-| **Dead letter queue** | Route failed invocations to SQS DLQ for manual investigation. |
+Configured with [`template.yaml`](template.yaml) using AWS SAM.
 
 ---
 
-## Enterprise Architecture Diagram
+## Master Enterprise Architecture Diagram
 
 ```text
-══════════════════════════════════════════════════════════════════════════════════════
-                         ALPHA VANTAGE DATA LAKE PIPELINE
-                        (Enterprise Medallion Architecture)
-══════════════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                   ALPHA VANTAGE DATA LAKE PIPELINE
+                               (Enterprise Medallion Architecture)
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+                                            ┌──────────────────────────────┐
+                                            │      Alpha Vantage API       │
+                                            └──────────────────────────────┘
+                                                         │
+          ┌──────────────────────────────────────────────┼──────────────────────────────────────────────┐
+          │                                              │                                              │
+          ▼                                              ▼                                              ▼
+ ┌────────────────────┐                        ┌────────────────────┐                        ┌────────────────────┐
+ │ TIME_SERIES_DAILY  │                        │ COMPANY_OVERVIEW   │                        │ TIME_SERIES_WEEKLY │
+ │        ✅           │                        │        🔄          │                        │        🚧          │
+ └────────────────────┘                        └────────────────────┘                        └────────────────────┘
+          │                                              │                                              │
+          └───────────────────────────────┬──────────────┴──────────────────────────────────────────────┘
+                                          │
+                                          ▼
+                          ┌─────────────────────────────────────┐
+                          │       API INGESTION LAYER           │
+                          │─────────────────────────────────────│
+                          │ • Lambda Entry Point                │
+                          │ • API Authentication & 16-key Pool  │
+                          │ • Request Builder & Rate-Limit Guard│
+                          │ • Standard API Response Validation  │
+                          │ • Error Handling & Retry Logic      │
+                          │ • Structured Logging ([INGEST])     │
+                          └─────────────────────────────────────┘
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                            BRONZE LAYER
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-                              ┌──────────────────────────────┐
-                              │      Alpha Vantage API       │
-                              └──────────────────────────────┘
+                              Raw Landing Zone (Immutable Data)
+
+                     s3://graywolf--data--lake/stock/bronze/source=alphavantage/
+                                          │
+                                          ▼
+                     year=YYYY/month=MM/day=DD/hour=HH/minute=MM/
+                                          │
+                                          ▼
+                   dataset=daily_time_series/   dataset=company_overview/
+                                          │
+                                          ▼
+                      IBM.json, AAPL.json, MSFT.json, NVDA.json...
+
+Characteristics:
+✓ Raw JSON only        ✓ Immutable storage    ✓ Source of Truth
+✓ No schema changes    ✓ No filtering/cleaning ✓ Replayable & Time-partitioned
+
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                  BRONZE EXTRACTION LAYER
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+                     Spark Reader (Explicit StructType Schemas)
+                                          │
+                                          ▼
+                            Raw Spark DataFrame Processing
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                   SILVER TRANSFORMATION
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+                         Daily Time Series                    Company Overview
+                         ──────────────────                   ──────────────────
+                         Flatten JSON                         Flatten JSON
+                         Rename Columns                       Rename Columns
+                         Snake Case Mapping                   Snake Case Mapping
+                         Data Type Casting                    Data Type Casting
+                         Null Normalization                   Fill Defaults
+                         Enrichment (30d avg, 52w high/low)  Add Metadata
+                         Add Partition Metadata
+
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                     DATA QUALITY LAYER
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+              ┌─────────────────────────────────────────────────────────────┐
+              │ • Schema Integrity Check                                    │
+              │ • Fake Null Normalization ("", "n/a", "none" -> NULL)       │
+              │ • Business Assertions (price > 0, high >= low, volume >= 0) │
+              │ • Quarantine Invalid Records (validation_status = INVALID)  │
+              └─────────────────────────────────────────────────────────────┘
+
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                              INCREMENTAL PROCESSING FRAMEWORK
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+                          DAILY DATASET                     OVERVIEW DATASET
+                                 │                                │
+                                 ▼                                ▼
+                        Date Watermark                  Hash Comparison
+                                 │                                │
+                     day_date > watermark?        overview_hash == watermark?
+                                 │                                │
+                      ┌──────────┴──────────┐        ┌────────────┴────────────┐
+                      │                     │        │                         │
+                     YES                   NO       SAME                  DIFFERENT
+                      │                     │        │                         │
+                      ▼                     ▼        ▼                         ▼
+            Process New Records      Skip Processing    Skip Processing   Process New Snapshot
+
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                  SILVER STORAGE LAYER
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+                  s3://graywolf--data--lake/stock/silver/source=alphavantage/
                                            │
-        ┌──────────────────────────────────┼──────────────────────────────────┐
-        │                                  │                                  │
-        ▼                                  ▼                                  ▼
-┌──────────────────┐            ┌──────────────────┐            ┌──────────────────┐
-│ TIME_SERIES_DAILY│            │ COMPANY_OVERVIEW │            │TIME_SERIES_WEEKLY│
-│       ✅         │            │       🔄         │            │       🚧         │
-└──────────────────┘            └──────────────────┘            └──────────────────┘
-        │                                  │                                  │
-        └──────────────────┬───────────────┴──────────────────────────────────┘
-                           │
-                           ▼
-            ┌──────────────────────────────┐
-            │     API INGESTION LAYER      │
-            │──────────────────────────────│
-            │ • Lambda Entry Point         │
-            │ • API Key Rotation (16 keys) │
-            │ • Error/Rate-Limit Guard     │
-            │ • Request Builder            │
-            │ • Structured Logging         │
-            └──────────────────────────────┘
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                                   BRONZE LAYER
-══════════════════════════════════════════════════════════════════════════════════════
+                                           ▼
+                            CSV Output  +  Parquet Output
+                            Time-partitioned (year/month/day/hour/minute)
 
-                    Raw Landing Zone (Immutable Data)
+                                           │
+                                           ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                   WATERMARK FRAMEWORK
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-           s3://graywolf--data--lake/stock/bronze/source=alphavantage/
+                      WatermarkManager (Hadoop FileSystem API)
+                      ┌────────────────────────────────────────┐
+                      │ watermark_exists()   read_watermark()  │
+                      │ write_watermark()    _path_exists()    │
+                      └────────────────────────────────────────┘
+                                           │
+                                           ▼
+            s3://graywolf--data--lake/watermark/bronze_to_silver/
+                     daily_time_series.json, company_overview.json
 
-               dataset=daily_time_series/
-               dataset=company_overview/
-                  year=YYYY/month=MM/day=DD/hour=HH/minute=MM/
-                     IBM.json, AAPL.json, MSFT.json ...
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                         GOLD LAYER
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-           ✓ Raw JSON only          ✓ Immutable storage
-           ✓ No schema changes      ✓ Source of Truth
-           ✓ Replayable             ✓ Time-partitioned
+                  Read Silver Parquet + CSV
+                          │
+                          ▼
+              Daily Time Series  +  Company Overview
+                          │
+                          ▼
+                 LEFT JOIN ON symbol
+                          │
+                          ▼
+             Gold Business Dataset (CSV + Parquet)
 
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                         BRONZE EXTRACTION (Spark Reader)
-══════════════════════════════════════════════════════════════════════════════════════
+                                          │
+                                          ▼
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                  DATA CONSUMERS & ANALYTICS
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-             Read JSON from Bronze S3 → Raw Spark DataFrame
-             Explicit schemas (no inferSchema)
+      ┌──────────────┬───────────────┬───────────────┬───────────────┐
+      ▼              ▼               ▼               ▼               ▼
+   AWS Athena    AWS Redshift     Power BI       ML Models       REST APIs
+  (Ad-hoc SQL)   (Data Whse)    (Dashboards)   (Predictive)     (External)
 
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                          SILVER TRANSFORMATION
-══════════════════════════════════════════════════════════════════════════════════════
-
-           Daily Time Series              Company Overview
-           ──────────────────             ──────────────────
-           Flatten JSON                   Flatten JSON
-           Rename Columns                 Rename Columns
-           Snake Case Mapping             Snake Case Mapping
-           Data Type Casting              Data Type Casting
-           Null Handling                  Null Handling
-           Validation (VALID/INVALID)     Fill Defaults
-           Enrichment:                    Add Metadata
-             • daily_change %
-             • 30-day averages
-             • 52-week high/low
-             • all-time high/low
-           Add Metadata
-
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                     INCREMENTAL PROCESSING FRAMEWORK
-══════════════════════════════════════════════════════════════════════════════════════
-
-         DAILY DATASET                        OVERVIEW DATASET
-              │                                     │
-              ▼                                     ▼
-        Date Watermark                       Hash Comparison
-              │                                     │
-     day_date > watermark?            overview_hash == watermark?
-              │                                     │
-     ┌────────┴────────┐               ┌────────────┴────────────┐
-     │                 │               │                         │
-    YES               NO             SAME                    DIFFERENT
-     │                 │               │                         │
-     ▼                 ▼               ▼                         ▼
-  Process          Skip             Skip                    Process
-  New Records      Processing       Processing              New Snapshot
-
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                             SILVER STORAGE LAYER
-══════════════════════════════════════════════════════════════════════════════════════
-
-           s3://graywolf--data--lake/stock/silver/source=alphavantage/
-
-               CSV Output + Parquet Output
-               Time-partitioned (year/month/day/hour/minute)
-
-           ✓ Clean Data           ✓ Typed Schema
-           ✓ Partitioned          ✓ Analytics Ready
-           ✓ Business Columns     ✓ Metadata Columns
-
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                            WATERMARK FRAMEWORK
-══════════════════════════════════════════════════════════════════════════════════════
-
-                    WatermarkManager
-                    ┌──────────────────────┐
-                    │ watermark_exists()   │
-                    │ read_watermark()     │
-                    │ write_watermark()    │
-                    │ _build_watermark_path│
-                    │ _path_exists()       │
-                    └──────────────────────┘
-
-           s3://graywolf--data--lake/watermark/bronze_to_silver/
-               daily_time_series.json
-               company_overview.json
-
-                           │
-                           ▼
-══════════════════════════════════════════════════════════════════════════════════════
-                              GOLD LAYER
-══════════════════════════════════════════════════════════════════════════════════════
-
-           Read Silver Parquet + CSV
-                    │
-             Daily Time Series  +  Company Overview
-                    │
-              LEFT JOIN ON symbol
-                    │
-              Gold Business Dataset
-                    │
-           Analytics / Reporting / BI
-
-══════════════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 ```
 
 ---
@@ -1067,11 +873,13 @@ sam logs -n StockPipelineFunction --tail
 | Bronze layer (raw JSON, time-partitioned, immutable) | ✅ |
 | Silver Daily transformation (15-step pipeline) | ✅ |
 | Silver Overview transformation (8-step pipeline) | ✅ |
+| Data Quality quarantine pattern | ✅ |
 | CSV + Parquet dual-format Silver writer | ✅ |
 | Gold layer (Daily + Overview join) | ✅ |
 | WatermarkManager (reusable framework) | ✅ |
 | Date-based incremental loading (Daily) | ✅ |
 | Pipeline refactoring into reusable methods | ✅ |
+| AWS SAM Infrastructure as Code (`template.yaml`) | ✅ |
 | Code cleanup (print → logger, dead code removed) | ✅ |
 
 ### 🔄 In Progress
@@ -1079,18 +887,6 @@ sam logs -n StockPipelineFunction --tail
 | Component | Status |
 |-----------|--------|
 | Hash-based incremental loading (Company Overview) | 🔄 |
-
-### Enterprise Concepts Implemented
-
-- ✅ Medallion Architecture (Bronze / Silver / Gold)
-- ✅ Immutable Bronze layer
-- ✅ Partitioned data lake
-- ✅ Incremental ETL with watermarking
-- ✅ Hash-based change detection (pattern defined)
-- ✅ Metadata management
-- ✅ Modular ETL design with reusable pipeline components
-- ✅ Production-grade structured logging
-- ✅ AWS Lambda-ready handler
 
 ---
 
@@ -1106,8 +902,8 @@ Future additions as part of the 90-day data engineering roadmap:
 | 🔜 | Iceberg / Delta Tables |
 | 🔜 | Amazon EMR |
 | 🔜 | Apache Airflow Orchestration |
-| 🔜 | Data Quality Layer |
-| 🔜 | Monitoring & CloudWatch |
+| 🔜 | Great Expectations Data Quality Integration |
+| 🔜 | Monitoring & CloudWatch Dashboards |
 | 🔜 | Redshift Data Warehouse |
 | 🔜 | BI & Dashboard Layer |
 
