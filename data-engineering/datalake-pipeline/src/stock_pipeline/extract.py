@@ -1,6 +1,12 @@
 """
-Extract stage — reads raw data from the Bronze S3 layer and Silver S3
-layer into Spark DataFrames.
+Extract Stage Module — Reads raw Bronze data and intermediate Silver data from AWS S3 into PySpark DataFrames.
+
+Key Responsibilities:
+  1. Explicit Schema Enforcement: Defines explicit `StructType` Spark schemas for Bronze JSON datasets
+     (Weekly Time Series, Daily Time Series, Company Overview) to ensure type safety and avoid runtime schema inference overhead.
+  2. REST API Extraction: Executes GET requests to the Alpha Vantage API endpoints with error/timeout handling.
+  3. S3 Partition Path Generation: Constructs S3 bucket keys for Bronze (raw JSON) and Silver (Parquet/CSV) storage formats.
+  4. Layer Data Extraction: Reads JSON, Parquet, and CSV files from S3 using PySpark Dataframe Readers.
 """
 
 import logging
@@ -19,13 +25,15 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
+# Base REST API URL for Alpha Vantage queries
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 
 
 # ============================================================
-# SPARK SCHEMAS — Bronze JSON
+# SPARK EXPLICIT SCHEMAS — Bronze JSON Payloads
 # ============================================================
 
+# Shared OHLCV struct definition for time series data points
 _ohlcv_fields = StructType([
     StructField("1. open", StringType(), True),
     StructField("2. high", StringType(), True),
@@ -34,6 +42,7 @@ _ohlcv_fields = StructType([
     StructField("5. volume", StringType(), True),
 ])
 
+# Explicit schema for Weekly Time Series raw JSON
 stock_schema_weekly = StructType([
     StructField("Meta Data", StructType([
         StructField("2. Symbol", StringType(), True),
@@ -42,6 +51,7 @@ stock_schema_weekly = StructType([
     StructField("Weekly Time Series", MapType(StringType(), _ohlcv_fields), True),
 ])
 
+# Explicit schema for Daily Time Series raw JSON
 stock_schema_daily = StructType([
     StructField("Meta Data", StructType([
         StructField("2. Symbol", StringType(), True),
@@ -50,6 +60,7 @@ stock_schema_daily = StructType([
     StructField("Time Series (Daily)", MapType(StringType(), _ohlcv_fields), True),
 ])
 
+# Explicit schema for Company Overview reference JSON (50+ business columns)
 stock_overview_schema = StructType([
     StructField("Symbol", StringType(), True),
     StructField("AssetType", StringType(), True),
@@ -108,26 +119,39 @@ stock_overview_schema = StructType([
 
 
 # ============================================================
-# EXTRACTOR
+# STOCK DATA EXTRACTOR CLASS
 # ============================================================
 
 class StockDataExtractor:
     """
-    Handles extraction of stock data from Bronze and Silver S3 layers.
-
-    Supported formats: JSON (Bronze), CSV / Parquet (Silver).
+    Handles data extraction from external APIs and S3 Bronze/Silver data lake partitions.
     """
 
     def __init__(self, spark: SparkSession):
+        """
+        Initialize Extractor with active SparkSession.
+
+        Args:
+            spark: Active SparkSession instance.
+        """
         self.spark = spark
         self.bucket_name = config.S3_BUCKET_NAME
 
     # ============================================================
-    # PATH BUILDERS
+    # S3 PATH BUILDERS
     # ============================================================
 
     def _bronze_bucket_key(self, dataset: str, execution_start_time: datetime) -> str:
-        """Build the S3 path prefix for a Bronze dataset partition."""
+        """
+        Build fully qualified S3 URI prefix for Bronze layer partitions.
+
+        Args:
+            dataset: Dataset folder name (e.g. 'daily_time_series').
+            execution_start_time: Execution start timestamp for partitioning.
+
+        Returns:
+            str: S3 URI string formatted as `s3a://{bucket}/stock/bronze/...`
+        """
         return (
             f"s3a://{self.bucket_name}/"
             f"stock/bronze/"
@@ -143,7 +167,17 @@ class StockDataExtractor:
     def _silver_bucket_key(
         self, dataset: str, data_format: str, execution_start_time: datetime,
     ) -> str:
-        """Build the S3 path prefix for a Silver dataset partition."""
+        """
+        Build fully qualified S3 URI prefix for Silver layer partitions.
+
+        Args:
+            dataset: Dataset folder name (e.g. 'daily_time_series').
+            data_format: Storage format extension ('csv' or 'parquet').
+            execution_start_time: Execution start timestamp for partitioning.
+
+        Returns:
+            str: S3 URI string formatted as `s3a://{bucket}/stock/silver/...`
+        """
         return (
             f"s3a://{self.bucket_name}/"
             f"stock/silver/"
@@ -158,19 +192,28 @@ class StockDataExtractor:
         )
 
     # ============================================================
-    # ALPHA VANTAGE API
+    # REST API CALLS
     # ============================================================
 
-    def fetch_alpha_vantage_api_data(self, params=None):
+    def fetch_alpha_vantage_api_data(self, params: dict = None) -> dict:
         """
-        Make a GET request to the Alpha Vantage API and return the
-        decoded JSON response.
+        Execute HTTP GET request against the Alpha Vantage REST API.
+
+        Args:
+            params: Dictionary containing query parameters ('function', 'symbol', 'apikey').
+
+        Returns:
+            dict: Decoded JSON response payload from Alpha Vantage.
+
+        Raises:
+            requests.exceptions.RequestException: If HTTP connection or status fails.
+            ValueError: If JSON decoding fails.
         """
         symbol = params.get("symbol") if params else None
         function = params.get("function") if params else None
 
         logger.info(
-            "[EXTRACT][API] Requesting Alpha Vantage: symbol=%s, function=%s",
+            "[EXTRACT][API_CALL] Executing HTTP GET to Alpha Vantage: symbol=%s, function=%s",
             symbol,
             function,
         )
@@ -183,17 +226,16 @@ class StockDataExtractor:
             )
 
             logger.info(
-                "[EXTRACT][API] Response received: symbol=%s, status=%s",
+                "[EXTRACT][API_RESPONSE] Received response: symbol=%s, HTTP Status=%s",
                 symbol,
                 response.status_code,
             )
 
             response.raise_for_status()
-
             response_data = response.json()
 
             logger.debug(
-                "[EXTRACT][API] Response top-level keys for %s: %s",
+                "[EXTRACT][API_KEYS] Top-level keys returned for symbol=%s: %s",
                 symbol,
                 list(response_data.keys()),
             )
@@ -201,35 +243,44 @@ class StockDataExtractor:
             return response_data
 
         except requests.exceptions.HTTPError as e:
-            logger.exception("[EXTRACT][API_FAIL] HTTP error for %s: %s", symbol, e)
+            logger.exception("[EXTRACT][API_FAIL] HTTP Error for symbol=%s: %s", symbol, e)
             raise
 
         except requests.exceptions.Timeout as e:
-            logger.exception("[EXTRACT][API_FAIL] Timeout for %s: %s", symbol, e)
+            logger.exception("[EXTRACT][API_FAIL] Timeout Error for symbol=%s: %s", symbol, e)
             raise
 
         except requests.exceptions.ConnectionError as e:
-            logger.exception("[EXTRACT][API_FAIL] Connection error for %s: %s", symbol, e)
+            logger.exception("[EXTRACT][API_FAIL] Connection Error for symbol=%s: %s", symbol, e)
             raise
 
         except requests.exceptions.RequestException as e:
-            logger.exception("[EXTRACT][API_FAIL] Request error for %s: %s", symbol, e)
+            logger.exception("[EXTRACT][API_FAIL] Request Error for symbol=%s: %s", symbol, e)
             raise
 
         except ValueError as e:
-            logger.exception("[EXTRACT][API_FAIL] JSON decode error for %s: %s", symbol, e)
+            logger.exception("[EXTRACT][API_FAIL] JSON Decode Error for symbol=%s: %s", symbol, e)
             raise
 
     # ============================================================
-    # BRONZE EXTRACTORS
+    # BRONZE LAYER EXTRACTORS
     # ============================================================
 
     def extract_bronze_weekly_data(
         self, dataset: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract weekly time-series JSON from the Bronze layer."""
+        """
+        Extract raw weekly time-series JSON files from Bronze S3 partition into a Spark DataFrame.
+
+        Args:
+            dataset: Dataset partition folder name.
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame matching `stock_schema_weekly`.
+        """
         bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
-        logger.info("[EXTRACT][BRONZE_WEEKLY] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][BRONZE_WEEKLY] Reading JSON files from: %s", bucket_key)
 
         try:
             df = (
@@ -240,19 +291,28 @@ class StockDataExtractor:
                 .option("recursiveFileLookup", "true")
                 .load(bucket_key)
             )
-            logger.info("[EXTRACT][BRONZE_WEEKLY] Extraction completed.")
+            logger.info("[EXTRACT][BRONZE_WEEKLY_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][BRONZE_WEEKLY_FAIL] %s", e)
+            logger.exception("[EXTRACT][BRONZE_WEEKLY_FAIL] Failed reading weekly data: %s", e)
             raise
 
     def extract_bronze_daily_data(
         self, dataset: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract daily time-series JSON from the Bronze layer."""
+        """
+        Extract raw daily time-series JSON files from Bronze S3 partition into a Spark DataFrame.
+
+        Args:
+            dataset: Dataset partition folder name.
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame matching `stock_schema_daily`.
+        """
         bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
-        logger.info("[EXTRACT][BRONZE_DAILY] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][BRONZE_DAILY] Reading JSON files from: %s", bucket_key)
 
         try:
             df = (
@@ -263,19 +323,28 @@ class StockDataExtractor:
                 .option("recursiveFileLookup", "true")
                 .load(bucket_key)
             )
-            logger.info("[EXTRACT][BRONZE_DAILY] Extraction completed.")
+            logger.info("[EXTRACT][BRONZE_DAILY_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][BRONZE_DAILY_FAIL] %s", e)
+            logger.exception("[EXTRACT][BRONZE_DAILY_FAIL] Failed reading daily data: %s", e)
             raise
 
     def extract_bronze_overview_data(
         self, dataset: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract company overview JSON from the Bronze layer."""
+        """
+        Extract raw company overview JSON files from Bronze S3 partition into a Spark DataFrame.
+
+        Args:
+            dataset: Dataset partition folder name.
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame matching `stock_overview_schema`.
+        """
         bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
-        logger.info("[EXTRACT][BRONZE_OVERVIEW] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][BRONZE_OVERVIEW] Reading JSON files from: %s", bucket_key)
 
         try:
             df = (
@@ -286,39 +355,58 @@ class StockDataExtractor:
                 .option("recursiveFileLookup", "true")
                 .load(bucket_key)
             )
-            logger.info("[EXTRACT][BRONZE_OVERVIEW] Extraction completed.")
+            logger.info("[EXTRACT][BRONZE_OVERVIEW_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][BRONZE_OVERVIEW_FAIL] %s", e)
+            logger.exception("[EXTRACT][BRONZE_OVERVIEW_FAIL] Failed reading overview data: %s", e)
             raise
 
     # ============================================================
-    # SILVER EXTRACTORS
+    # SILVER LAYER EXTRACTORS
     # ============================================================
 
     def extract_silver_daily_data_parquet(
         self, dataset: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract daily time-series Parquet from the Silver layer."""
+        """
+        Extract processed daily time-series Parquet files from Silver S3 layer.
+
+        Args:
+            dataset: Dataset partition folder name.
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame loaded from Parquet.
+        """
         bucket_key = self._silver_bucket_key(dataset, "parquet", execution_start_time)
-        logger.info("[EXTRACT][SILVER_DAILY_PARQUET] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][SILVER_DAILY_PARQUET] Reading Parquet files from: %s", bucket_key)
 
         try:
             df = self.spark.read.format("parquet").load(bucket_key)
-            logger.info("[EXTRACT][SILVER_DAILY_PARQUET] Extraction completed.")
+            logger.info("[EXTRACT][SILVER_DAILY_PARQUET_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][SILVER_DAILY_PARQUET_FAIL] %s", e)
+            logger.exception("[EXTRACT][SILVER_DAILY_PARQUET_FAIL] Failed reading daily Parquet: %s", e)
             raise
 
     def extract_silver_daily_data_csv(
         self, dataset: str, data_format: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract daily time-series CSV from the Silver layer."""
+        """
+        Extract processed daily time-series CSV files from Silver S3 layer.
+
+        Args:
+            dataset: Dataset partition folder name.
+            data_format: Storage format string ('csv').
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame loaded from CSV.
+        """
         bucket_key = self._silver_bucket_key(dataset, data_format, execution_start_time)
-        logger.info("[EXTRACT][SILVER_DAILY_CSV] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][SILVER_DAILY_CSV] Reading CSV files from: %s", bucket_key)
 
         try:
             df = (
@@ -327,35 +415,54 @@ class StockDataExtractor:
                 .format(data_format)
                 .load(bucket_key)
             )
-            logger.info("[EXTRACT][SILVER_DAILY_CSV] Extraction completed.")
+            logger.info("[EXTRACT][SILVER_DAILY_CSV_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][SILVER_DAILY_CSV_FAIL] %s", e)
+            logger.exception("[EXTRACT][SILVER_DAILY_CSV_FAIL] Failed reading daily CSV: %s", e)
             raise
 
     def extract_silver_overview_data_parquet(
         self, dataset: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract company overview Parquet from the Silver layer."""
+        """
+        Extract processed company overview Parquet files from Silver S3 layer.
+
+        Args:
+            dataset: Dataset partition folder name.
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame loaded from Parquet.
+        """
         bucket_key = self._silver_bucket_key(dataset, "parquet", execution_start_time)
-        logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET] Reading Parquet files from: %s", bucket_key)
 
         try:
             df = self.spark.read.format("parquet").load(bucket_key)
-            logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET] Extraction completed.")
+            logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][SILVER_OVERVIEW_PARQUET_FAIL] %s", e)
+            logger.exception("[EXTRACT][SILVER_OVERVIEW_PARQUET_FAIL] Failed reading overview Parquet: %s", e)
             raise
 
     def extract_silver_overview_data_csv(
         self, dataset: str, data_format: str, execution_start_time: datetime,
     ) -> DataFrame:
-        """Extract company overview CSV from the Silver layer."""
+        """
+        Extract processed company overview CSV files from Silver S3 layer.
+
+        Args:
+            dataset: Dataset partition folder name.
+            data_format: Storage format string ('csv').
+            execution_start_time: Execution start timestamp.
+
+        Returns:
+            DataFrame: Spark DataFrame loaded from CSV.
+        """
         bucket_key = self._silver_bucket_key(dataset, data_format, execution_start_time)
-        logger.info("[EXTRACT][SILVER_OVERVIEW_CSV] Reading from: %s", bucket_key)
+        logger.info("[EXTRACT][SILVER_OVERVIEW_CSV] Reading CSV files from: %s", bucket_key)
 
         try:
             df = (
@@ -364,9 +471,9 @@ class StockDataExtractor:
                 .format(data_format)
                 .load(bucket_key)
             )
-            logger.info("[EXTRACT][SILVER_OVERVIEW_CSV] Extraction completed.")
+            logger.info("[EXTRACT][SILVER_OVERVIEW_CSV_OK] Extraction completed.")
             return df
 
         except Exception as e:
-            logger.exception("[EXTRACT][SILVER_OVERVIEW_CSV_FAIL] %s", e)
+            logger.exception("[EXTRACT][SILVER_OVERVIEW_CSV_FAIL] Failed reading overview CSV: %s", e)
             raise

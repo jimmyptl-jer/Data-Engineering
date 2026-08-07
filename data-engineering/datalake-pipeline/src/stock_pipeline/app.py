@@ -1,10 +1,19 @@
 """
-Entry point — ties extract -> transform -> load together, and exposes
-lambda_handler for AWS Lambda/SAM.
+Stock Data Pipeline Entry Point & Orchestrator module.
 
-Incremental strategies:
-  - Daily Time Series : date-based watermark (day_date column).
-  - Company Overview  : hash-based change detection (SHA-256 of business columns).
+This module acts as the core orchestrator for the Alpha Vantage ETL pipeline.
+It ties together the Extractor, Transformer, Loader, and Watermark components,
+implementing a Medallion Architecture (Bronze -> Silver -> Gold).
+
+Key Pipeline Phases:
+  1. Ingestion: Fetches raw JSON payloads from Alpha Vantage API and lands them in S3 Bronze.
+  2. Bronze-to-Silver (Daily): Extracts raw JSON, applies date-based watermark filtering,
+     cleans, validates, enriches metrics, and writes Silver CSV & Parquet outputs.
+  3. Bronze-to-Silver (Overview): Extracts raw JSON, transforms reference company data into Silver CSV & Parquet.
+  4. Gold Build: Reads Silver Daily & Overview datasets, performs a LEFT JOIN on stock symbol,
+     and writes unified business dataset to S3 Gold layer.
+
+Supports execution both as a local standalone script and as an AWS Lambda handler.
 """
 
 import logging
@@ -40,8 +49,19 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def create_spark_session() -> SparkSession:
-    """Create and return a configured SparkSession."""
-    logger.info("[INIT] Initializing Spark session.")
+    """
+    Create, configure, and return an active SparkSession instance.
+
+    Configures PySpark with the Hadoop AWS package (`org.apache.hadoop:hadoop-aws:3.4.1`)
+    to allow direct read/write access to AWS S3 using `s3a://` URIs.
+
+    Returns:
+        SparkSession: Ready-to-use active SparkSession.
+
+    Raises:
+        Exception: If SparkSession initialization fails.
+    """
+    logger.info("[INIT] Initializing Spark session for StockDataPipeline.")
 
     try:
         spark = (
@@ -66,10 +86,21 @@ def create_spark_session() -> SparkSession:
 # SILVER LAYER WRITE HELPERS
 # ============================================================
 
-def _write_silver_parquet(df, base_path, dataset_name, execution_start_time):
-    """Write a DataFrame to the Silver layer in Parquet format."""
+def _write_silver_parquet(df, base_path: str, dataset_name: str, execution_start_time: datetime) -> None:
+    """
+    Write a processed DataFrame to the Silver layer in compressed Parquet format.
+
+    Partitioning Hierarchy:
+      `{base_path}dataset={dataset_name}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/format=parquet/`
+
+    Args:
+        df: PySpark DataFrame to write.
+        base_path: Base S3 path prefix for the Silver layer.
+        dataset_name: Name of the dataset (e.g., 'daily_time_series', 'company_overview').
+        execution_start_time: Timestamp representing the pipeline execution start.
+    """
     logger.info(
-        "[SILVER][WRITE_PARQUET] dataset=%s, base_path=%s",
+        "[SILVER][WRITE_PARQUET] Writing dataset=%s to base_path=%s",
         dataset_name,
         base_path,
     )
@@ -92,10 +123,21 @@ def _write_silver_parquet(df, base_path, dataset_name, execution_start_time):
     logger.info("[SILVER][WRITE_PARQUET_OK] Parquet write completed for dataset=%s.", dataset_name)
 
 
-def _write_silver_csv(df, base_path, dataset_name, execution_start_time):
-    """Write a DataFrame to the Silver layer in CSV format."""
+def _write_silver_csv(df, base_path: str, dataset_name: str, execution_start_time: datetime) -> None:
+    """
+    Write a processed DataFrame to the Silver layer in human-readable CSV format.
+
+    Partitioning Hierarchy:
+      `{base_path}dataset={dataset_name}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/format=csv/`
+
+    Args:
+        df: PySpark DataFrame to write.
+        base_path: Base S3 path prefix for the Silver layer.
+        dataset_name: Name of the dataset (e.g., 'daily_time_series', 'company_overview').
+        execution_start_time: Timestamp representing the pipeline execution start.
+    """
     logger.info(
-        "[SILVER][WRITE_CSV] dataset=%s, base_path=%s",
+        "[SILVER][WRITE_CSV] Writing dataset=%s to base_path=%s",
         dataset_name,
         base_path,
     )
@@ -120,23 +162,27 @@ def _write_silver_csv(df, base_path, dataset_name, execution_start_time):
 
 
 # ============================================================
-# STOCK PIPELINE
+# STOCK PIPELINE CLASS
 # ============================================================
 
 class StockPipeline:
     """
-    Orchestrates the full ETL pipeline:
-      Ingestion -> Bronze -> Silver -> Gold
+    Main ETL Orchestrator Class for the Stock Data Pipeline.
 
-    Supports two incremental strategies:
-      - Date-based watermark (Daily Time Series)
-      - Hash-based change detection (Company Overview)
+    Responsibilities:
+      - Initializing pipeline dependencies (Spark, Extractors, Transformers, Loaders, Watermarks).
+      - Ingesting raw API responses from Alpha Vantage to Bronze S3.
+      - Executing Bronze-to-Silver ETL cycles with date-based watermark incrementality.
+      - Executing Bronze-to-Silver company overview reference dataset ETL cycles.
+      - Building the Gold unified dataset by joining Silver datasets.
     """
 
     def __init__(self):
-        logger.info("[PIPELINE] Initializing StockPipeline.")
+        """Initialize the StockPipeline and verify cloud configuration."""
+        logger.info("[PIPELINE] Initializing StockPipeline orchestrator.")
 
         try:
+            # 1. Load AWS & Pipeline Config
             self.aws_access_key_id = config.AWS_ACCESS_KEY_ID
             self.aws_secret_access_key = config.AWS_SECRET_ACCESS_KEY
             self.s3_bucket_name = config.S3_BUCKET_NAME
@@ -145,8 +191,10 @@ class StockPipeline:
             self.silver_base_path = config.SILVER_BASE_PATH
             self.gold_base_path = config.GOLD_BASE_PATH
 
+            # 2. Initialize Spark Session
             self.spark = create_spark_session()
 
+            # 3. Instantiate Subsystems
             self.extractor = StockDataExtractor(self.spark)
             self.transformer = StockDataTransformer(self.spark)
             self.watermark_manager = WatermarkManager(self.spark)
@@ -164,29 +212,33 @@ class StockPipeline:
                 bucket_name=self.s3_bucket_name,
             )
 
-            logger.info("[PIPELINE] StockPipeline initialized. S3 bucket: %s", self.s3_bucket_name)
+            logger.info("[PIPELINE] StockPipeline initialized successfully. S3 Bucket: %s", self.s3_bucket_name)
 
         except Exception as e:
             logger.exception("[PIPELINE] Failed to initialize StockPipeline: %s", e)
             raise
 
     # ============================================================
-    # INGESTION
+    # INGESTION LAYER
     # ============================================================
 
     def _ingest_from_api(
         self,
-        stock_symbols: list,
+        stock_symbols: list[str],
         execution_start_time: datetime,
-    ) -> list:
+    ) -> list[dict]:
         """
-        Ingest raw data from Alpha Vantage API into the Bronze S3 layer
-        for all configured endpoints and symbols.
+        Fetch raw market data from Alpha Vantage API for all symbols and endpoints,
+        writing raw JSON files to S3 Bronze layer.
+
+        Args:
+            stock_symbols: List of stock ticker symbols (e.g., ['IBM', 'AAPL']).
+            execution_start_time: Pipeline execution timestamp.
 
         Returns:
-            List of per-symbol/endpoint result dicts.
+            List of dictionary results summarizing ingestion outcomes per symbol & function.
         """
-        logger.info("[INGEST] Starting API ingestion for %d symbol(s).", len(stock_symbols))
+        logger.info("[INGEST] Starting API ingestion cycle for %d symbol(s).", len(stock_symbols))
 
         results = []
 
@@ -211,7 +263,7 @@ class StockPipeline:
 
                 except Exception as e:
                     logger.exception(
-                        "[INGEST] Error ingesting symbol=%s via %s: %s",
+                        "[INGEST] Error ingesting symbol=%s via function=%s: %s",
                         symbol, function, e,
                     )
                     results.append({
@@ -220,7 +272,7 @@ class StockPipeline:
                         "error": str(e),
                     })
 
-        logger.info("[INGEST] Ingestion completed. %d result(s).", len(results))
+        logger.info("[INGEST] Ingestion cycle completed. Total requests processed: %d.", len(results))
         return results
 
     # ============================================================
@@ -233,30 +285,34 @@ class StockPipeline:
         batch_id: str,
     ) -> bool:
         """
-        Full Bronze -> Silver cycle for the Daily Time Series dataset.
+        Execute the Bronze -> Silver processing cycle for Daily Time Series data.
 
-        Uses date-based watermark: only rows with day_date > last watermark
-        are processed.
+        Applies date-based watermark state tracking:
+          - Reads existing watermark (if present) for `daily_time_series`.
+          - Filters Bronze records to only include rows with `day_date > last_watermark`.
+          - Transforms, cleans, validates, and enriches new records.
+          - Writes output in CSV and Parquet formats to Silver S3 layer.
+          - Updates the watermark JSON file with the new maximum `day_date`.
 
         Args:
             execution_start_time: Pipeline execution timestamp.
-            batch_id: Current batch identifier.
+            batch_id: Unique batch execution identifier.
 
         Returns:
-            True if Silver was written, False if skipped (no new data).
+            bool: True if Silver output was written, False if skipped due to no new records.
         """
         daily_dataset = config.get_dataset_name_by_function("TIME_SERIES_DAILY")
         pipeline_name = "bronze_to_silver"
 
         logger.info("[DAILY] Starting Bronze-to-Silver cycle for dataset=%s.", daily_dataset)
 
-        # --- Bronze Extract ---
+        # 1. Extract raw JSON from Bronze layer into PySpark DataFrame
         extracted_daily_data = self.extractor.extract_bronze_daily_data(
             daily_dataset,
             execution_start_time=execution_start_time,
         )
 
-        # --- Watermark Check ---
+        # 2. Retrieve existing watermark value (if present)
         watermark_value = None
 
         if self.watermark_manager.watermark_exists(pipeline_name, daily_dataset):
@@ -267,24 +323,25 @@ class StockPipeline:
             watermark_value = daily_watermark.get("watermark_value")
 
             logger.info(
-                "[DAILY] Existing watermark found: watermark_value=%s. Incremental load.",
+                "[DAILY] Existing watermark found: watermark_value=%s. Executing incremental load.",
                 watermark_value,
             )
         else:
-            logger.info("[DAILY] No watermark found. Performing full load.")
+            logger.info("[DAILY] No prior watermark found. Executing full historical load.")
 
-        # --- Silver Transform (watermark filtering happens inside) ---
+        # 3. Transform Bronze DataFrame to Silver schema (filters by day_date > watermark_value)
         daily_df = self.transformer.silver_transform_daily_timeseries(
             daily_dataset,
             extracted_daily_data,
             watermark_value=watermark_value,
         )
 
+        # 4. Check if new records exist after watermark filtering
         if daily_df.isEmpty():
-            logger.info("[DAILY] No new records after watermark filter. Skipping Silver write.")
+            logger.info("[DAILY] No new records detected after watermark filtering. Skipping Silver write.")
             return False
 
-        # --- Compute new watermark value ---
+        # 5. Extract latest trading day date to update the watermark
         daily_latest_watermark_value = (
             daily_df
             .agg(spark_max("day_date").alias("watermark_value"))
@@ -292,11 +349,11 @@ class StockPipeline:
         )
 
         logger.info(
-            "[DAILY] New watermark value: %s",
+            "[DAILY] New maximum watermark value computed: %s",
             daily_latest_watermark_value,
         )
 
-        # --- Silver Write ---
+        # 6. Write Silver outputs (CSV & Parquet)
         _write_silver_csv(
             daily_df,
             self.silver_base_path,
@@ -311,7 +368,7 @@ class StockPipeline:
             execution_start_time,
         )
 
-        # --- Watermark Write ---
+        # 7. Persist updated watermark payload
         self.watermark_manager.write_watermark(
             watermark={
                 "pipeline_name": pipeline_name,
@@ -327,7 +384,7 @@ class StockPipeline:
             },
         )
 
-        logger.info("[DAILY] Bronze-to-Silver cycle completed successfully.")
+        logger.info("[DAILY] Bronze-to-Silver daily processing cycle completed successfully.")
         return True
 
     # ============================================================
@@ -340,50 +397,46 @@ class StockPipeline:
         batch_id: str,
     ) -> bool:
         """
-        Full Bronze -> Silver cycle for the Company Overview dataset.
+        Execute the Bronze -> Silver processing cycle for Company Overview reference data.
 
-        TODO: Implement hash-based change detection:
-          1. Generate overview_hash (hash only business columns,
-             exclude processed_at, batch_id, watermark fields).
-          2. Read existing watermark from watermark/bronze_to_silver/company_overview.json.
-          3. Compare new hash vs old hash.
-          4. If different -> write Silver (CSV + Parquet) + update watermark.
-          5. If same -> skip Silver write + skip watermark update.
+        Reference data changes infrequently. The hash-based incremental strategy:
+          1. Generates `overview_hash` (SHA-256 digest of business columns).
+          2. Reads existing watermark from `watermark/bronze_to_silver/company_overview.json`.
+          3. Compares new content hash vs existing hash.
+          4. If different -> writes Silver (CSV & Parquet) and updates watermark.
+          5. If identical -> skips Silver write to save storage and compute.
 
         Args:
             execution_start_time: Pipeline execution timestamp.
-            batch_id: Current batch identifier.
+            batch_id: Unique batch execution identifier.
 
         Returns:
-            True if Silver was written, False if skipped (hash unchanged).
+            bool: True if Silver output was written, False if skipped due to no data changes.
         """
         overview_dataset = config.get_dataset_name_by_function("OVERVIEW")
         pipeline_name = "bronze_to_silver"
 
         logger.info("[OVERVIEW] Starting Bronze-to-Silver cycle for dataset=%s.", overview_dataset)
 
-        # --- Bronze Extract ---
+        # 1. Extract raw JSON overview from Bronze layer
         extracted_overview_data = self.extractor.extract_bronze_overview_data(
             overview_dataset,
             execution_start_time=execution_start_time,
         )
 
-        # --- Silver Transform ---
+        # 2. Transform raw overview JSON into typed Silver DataFrame
         overview_df = self.transformer.silver_transform_overview(
             extracted_overview_data,
         )
 
         # -------------------------------------------------------
-        # TODO: Add hash-based change detection here.
-        #
-        # Steps:
-        #   1. new_hash = compute hash of overview_df business columns
-        #   2. Read existing watermark -> get stored overview_hash
-        #   3. if new_hash == old_hash: skip Silver write, return False
-        #   4. if different: proceed to Silver write below
+        # TODO: Add hash-based change detection here:
+        #   1. new_hash = compute_content_hash(overview_df)
+        #   2. Read existing watermark -> get old overview_hash
+        #   3. if new_hash == old_hash: skip write & return False
         # -------------------------------------------------------
 
-        # --- Silver Write ---
+        # 3. Write Silver outputs (CSV & Parquet)
         _write_silver_csv(
             overview_df,
             self.silver_base_path,
@@ -398,7 +451,7 @@ class StockPipeline:
             execution_start_time,
         )
 
-        # --- Watermark Write ---
+        # 4. Update Overview Watermark JSON
         self.watermark_manager.write_watermark(
             watermark={
                 "pipeline_name": pipeline_name,
@@ -411,11 +464,11 @@ class StockPipeline:
                 "status": "SUCCESS",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "updated_by": "stock_pipeline",
-                "remarks": "Bronze to Silver completed. TODO: add hash value.",
+                "remarks": "Bronze to Silver completed. TODO: add content hash value.",
             },
         )
 
-        logger.info("[OVERVIEW] Bronze-to-Silver cycle completed successfully.")
+        logger.info("[OVERVIEW] Bronze-to-Silver overview cycle completed successfully.")
         return True
 
     # ============================================================
@@ -424,19 +477,25 @@ class StockPipeline:
 
     def _build_gold_layer(self, execution_start_time: datetime) -> None:
         """
-        Read Silver datasets, join Daily + Overview, and write the
-        Gold-layer company dataset in both CSV and Parquet.
+        Rebuild the Gold layer dataset by joining Silver Daily Time Series
+        and Silver Company Overview reference data on `symbol`.
 
-        Gold is always rebuilt for consistency regardless of whether
-        individual Silver datasets were updated in this run.
+        The Gold layer represents an analytics-ready unified data model,
+        combining daily price movement metrics with company fundamental attributes
+        (e.g., Sector, Industry, PE Ratio, Market Cap).
+
+        Gold is always rebuilt to maintain schema and state consistency across runs.
+
+        Args:
+            execution_start_time: Pipeline execution timestamp.
         """
         daily_dataset = config.get_dataset_name_by_function("TIME_SERIES_DAILY")
         overview_dataset = config.get_dataset_name_by_function("OVERVIEW")
 
-        logger.info("[GOLD] Building Gold layer from Silver datasets.")
+        logger.info("[GOLD] Starting Gold layer build from Silver datasets.")
 
-        # --- Parquet path ---
-        logger.info("[GOLD] Reading Silver Parquet datasets.")
+        # 1. Parquet Path: Read Silver Parquet inputs
+        logger.info("[GOLD] Extracting Silver Parquet DataFrames.")
 
         daily_parquet = self.extractor.extract_silver_daily_data_parquet(
             daily_dataset, execution_start_time=execution_start_time,
@@ -445,6 +504,7 @@ class StockPipeline:
             overview_dataset, execution_start_time=execution_start_time,
         )
 
+        # Select business columns and avoid duplicate metadata timestamps
         daily_parquet = daily_parquet.select(
             "symbol", "day_date",
             "open", "high", "low", "close", "volume",
@@ -456,12 +516,13 @@ class StockPipeline:
 
         overview_parquet = overview_parquet.drop("processed_at")
 
+        # Perform Left Outer Join on stock symbol
         gold_parquet_df = daily_parquet.join(
             overview_parquet, on="symbol", how="left",
         )
 
-        # --- CSV path ---
-        logger.info("[GOLD] Reading Silver CSV datasets.")
+        # 2. CSV Path: Read Silver CSV inputs
+        logger.info("[GOLD] Extracting Silver CSV DataFrames.")
 
         daily_csv = self.extractor.extract_silver_daily_data_csv(
             daily_dataset, "csv", execution_start_time=execution_start_time,
@@ -485,8 +546,8 @@ class StockPipeline:
             overview_csv, on="symbol", how="left",
         )
 
-        # --- Write Gold ---
-        logger.info("[GOLD] Writing Gold layer.")
+        # 3. Write Gold Layer Outputs
+        logger.info("[GOLD] Writing Gold layer dataset (CSV & Parquet).")
 
         _write_silver_csv(
             gold_csv_df,
@@ -510,49 +571,49 @@ class StockPipeline:
     # PIPELINE ORCHESTRATOR
     # ============================================================
 
-    def run(self, execution_start_time: datetime, stock_symbols: list):
+    def run(self, execution_start_time: datetime, stock_symbols: list[str]) -> list[dict]:
         """
-        Execute the full ETL pipeline:
-          1. Ingest from Alpha Vantage API -> Bronze
-          2. Process Daily dataset (date-based incremental) -> Silver
-          3. Process Overview dataset (hash-based incremental) -> Silver
-          4. Build Gold layer (join Daily + Overview)
+        Execute the full end-to-end Medallion ETL pipeline:
+          1. API Ingestion -> Bronze S3 JSON
+          2. Bronze -> Silver Daily processing (date-based watermark)
+          3. Bronze -> Silver Overview processing (hash-based change detection)
+          4. Gold dataset construction (Daily + Overview join)
 
         Args:
-            execution_start_time: Pipeline execution timestamp.
-            stock_symbols: List of ticker symbols to process.
+            execution_start_time: UTC execution timestamp.
+            stock_symbols: List of stock symbols to process.
 
         Returns:
-            List of per-symbol/endpoint ingestion result dicts.
+            List of ingestion result dictionaries.
         """
-        logger.info("[PIPELINE] Starting ETL pipeline.")
+        logger.info("[PIPELINE] Starting end-to-end ETL execution.")
 
         batch_id = f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
 
         try:
-            # 1. INGESTION
+            # Step 1: API Ingestion -> Bronze
             results = self._ingest_from_api(stock_symbols, execution_start_time)
 
-            # 2. DAILY — Date-Based Watermark
+            # Step 2: Bronze -> Silver Daily Time Series
             daily_written = self._process_daily_dataset(execution_start_time, batch_id)
-            logger.info("[PIPELINE] Daily Silver written: %s", daily_written)
+            logger.info("[PIPELINE] Daily Silver output written: %s", daily_written)
 
-            # 3. OVERVIEW — Hash-Based Change Detection
+            # Step 3: Bronze -> Silver Company Overview
             overview_written = self._process_overview_dataset(execution_start_time, batch_id)
-            logger.info("[PIPELINE] Overview Silver written: %s", overview_written)
+            logger.info("[PIPELINE] Overview Silver output written: %s", overview_written)
 
-            # 4. GOLD LAYER (always rebuild for consistency)
+            # Step 4: Silver -> Gold Unified Dataset
             self._build_gold_layer(execution_start_time)
 
-            # 5. SUMMARY
+            # Execution duration metric
             duration = (datetime.now(timezone.utc) - execution_start_time).total_seconds()
-            logger.info("[PIPELINE] Completed successfully. Duration: %.2f seconds.", duration)
+            logger.info("[PIPELINE] ETL pipeline completed successfully. Execution duration: %.2f seconds.", duration)
 
             return results
 
         except Exception:
             duration = (datetime.now(timezone.utc) - execution_start_time).total_seconds()
-            logger.exception("[PIPELINE] Failed after %.2f seconds.", duration)
+            logger.exception("[PIPELINE] ETL pipeline failed after %.2f seconds.", duration)
             raise
 
 
@@ -562,15 +623,22 @@ class StockPipeline:
 
 def lambda_handler(event, context):
     """
-    AWS Lambda entry point for the Stock Data Pipeline.
+    AWS Lambda handler entry point.
 
-    Accepts an optional ``stock_symbols`` list in the event payload.
-    Defaults to ``["IBM"]`` if not provided.
+    Accepts an event payload containing optional `stock_symbols`.
+    Defaults to `["IBM"]` if no symbols are passed.
+
+    Args:
+        event: Dict containing invocation event details.
+        context: AWS Lambda context object.
+
+    Returns:
+        dict: Standard HTTP response dictionary with execution status and summary results.
     """
     execution_start_time = datetime.now(timezone.utc)
 
     logger.info(
-        "[LAMBDA] Execution started at %s",
+        "[LAMBDA] Execution triggered at %s",
         execution_start_time.isoformat(),
     )
 
@@ -584,24 +652,23 @@ def lambda_handler(event, context):
             stock_symbols=stock_symbols,
         )
 
-        # Ingestion summary
         successful = [r["symbol"] for r in results if "error" not in r]
         failed = [r["symbol"] for r in results if "error" in r]
 
         logger.info(
-            "[LAMBDA] Ingestion summary — Successful: %d, Failed: %d",
+            "[LAMBDA] Execution summary — Successful symbols: %d, Failed symbols: %d",
             len(successful),
             len(failed),
         )
 
         if failed:
-            logger.warning("[LAMBDA] Failed symbols: %s", failed)
+            logger.warning("[LAMBDA] Failed ingestion symbols: %s", failed)
 
         execution_end_time = datetime.now(timezone.utc)
         total_duration = (execution_end_time - execution_start_time).total_seconds()
 
         logger.info(
-            "[LAMBDA] Execution completed. Duration: %.2f seconds.",
+            "[LAMBDA] Execution completed successfully in %.2f seconds.",
             total_duration,
         )
 
@@ -625,15 +692,15 @@ def lambda_handler(event, context):
 
 
 # ============================================================
-# LOCAL EXECUTION
+# LOCAL EXECUTION ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
-    logger.info("[LOCAL] Running Stock Data Pipeline locally.")
+    logger.info("[LOCAL] Executing Stock Data Pipeline locally.")
 
     try:
         lambda_handler({}, {})
-        logger.info("[LOCAL] Execution completed.")
+        logger.info("[LOCAL] Execution completed successfully.")
 
     except Exception as e:
         logger.exception("[LOCAL] Execution failed: %s", e)
