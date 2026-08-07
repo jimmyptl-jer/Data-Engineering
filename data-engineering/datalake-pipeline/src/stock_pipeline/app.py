@@ -226,19 +226,36 @@ class StockPipeline:
         self,
         stock_symbols: list[str],
         execution_start_time: datetime,
+        full_load: bool = False,
     ) -> list[dict]:
         """
         Fetch raw market data from Alpha Vantage API for all symbols and endpoints,
         writing raw JSON files to S3 Bronze layer.
 
+        Full Load vs Incremental Strategy for Bronze Ingestion:
+          - Initial run (or full_load=True): Uses outputsize='full' to fetch 20+ years of historical data into Bronze.
+          - Subsequent runs: Uses outputsize='compact' to fetch only the latest 100 daily data points into Bronze.
+
         Args:
             stock_symbols: List of stock ticker symbols (e.g., ['IBM', 'AAPL']).
             execution_start_time: Pipeline execution timestamp.
+            full_load: If True, forces outputsize='full' for complete historical load.
 
         Returns:
             List of dictionary results summarizing ingestion outcomes per symbol & function.
         """
         logger.info("[INGEST] Starting API ingestion cycle for %d symbol(s).", len(stock_symbols))
+
+        daily_dataset = config.get_dataset_name_by_function("TIME_SERIES_DAILY")
+        watermark_exists = self.watermark_manager.watermark_exists("bronze_to_silver", daily_dataset)
+
+        # Determine payload size: full (20+ years history) if initial run or requested, compact (last 100 days) if incremental
+        if full_load or not watermark_exists:
+            outputsize = "full"
+            logger.info("[INGEST] Mode: FULL LOAD (outputsize='full' — 20+ years historical data).")
+        else:
+            outputsize = "compact"
+            logger.info("[INGEST] Mode: INCREMENTAL LOAD (outputsize='compact' — last 100 days data).")
 
         results = []
 
@@ -253,11 +270,13 @@ class StockPipeline:
                         function=function,
                         dataset=dataset,
                         execution_start_time=execution_start_time,
+                        outputsize=outputsize,
                     )
 
                     results.append({
                         "symbol": symbol,
                         "function": function,
+                        "outputsize": outputsize if "TIME_SERIES" in function else "N/A",
                         "response": response,
                     })
 
@@ -571,10 +590,15 @@ class StockPipeline:
     # PIPELINE ORCHESTRATOR
     # ============================================================
 
-    def run(self, execution_start_time: datetime, stock_symbols: list[str]) -> list[dict]:
+    def run(
+        self,
+        execution_start_time: datetime,
+        stock_symbols: list[str],
+        full_load: bool = False,
+    ) -> list[dict]:
         """
         Execute the full end-to-end Medallion ETL pipeline:
-          1. API Ingestion -> Bronze S3 JSON
+          1. API Ingestion -> Bronze S3 JSON (Full load on initial run or if full_load=True, Incremental load otherwise)
           2. Bronze -> Silver Daily processing (date-based watermark)
           3. Bronze -> Silver Overview processing (hash-based change detection)
           4. Gold dataset construction (Daily + Overview join)
@@ -582,17 +606,22 @@ class StockPipeline:
         Args:
             execution_start_time: UTC execution timestamp.
             stock_symbols: List of stock symbols to process.
+            full_load: If True, forces outputsize='full' on Bronze ingestion for complete 20+ year history.
 
         Returns:
             List of ingestion result dictionaries.
         """
-        logger.info("[PIPELINE] Starting end-to-end ETL execution.")
+        logger.info("[PIPELINE] Starting end-to-end ETL execution (full_load=%s).", full_load)
 
         batch_id = f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
 
         try:
             # Step 1: API Ingestion -> Bronze
-            results = self._ingest_from_api(stock_symbols, execution_start_time)
+            results = self._ingest_from_api(
+                stock_symbols,
+                execution_start_time,
+                full_load=full_load,
+            )
 
             # Step 2: Bronze -> Silver Daily Time Series
             daily_written = self._process_daily_dataset(execution_start_time, batch_id)
@@ -625,8 +654,14 @@ def lambda_handler(event, context):
     """
     AWS Lambda handler entry point.
 
-    Accepts an event payload containing optional `stock_symbols`.
-    Defaults to `["IBM"]` if no symbols are passed.
+    Accepts an event payload containing optional `stock_symbols` and `full_load` flag.
+    Defaults to `stock_symbols=["IBM"]` and `full_load=False` if not specified.
+
+    Sample Event Payload:
+      {
+        "stock_symbols": ["IBM", "AAPL"],
+        "full_load": true
+      }
 
     Args:
         event: Dict containing invocation event details.
@@ -642,7 +677,9 @@ def lambda_handler(event, context):
         execution_start_time.isoformat(),
     )
 
-    stock_symbols = event.get("stock_symbols", ["IBM"]) if isinstance(event, dict) else ["IBM"]
+    is_dict = isinstance(event, dict)
+    stock_symbols = event.get("stock_symbols", ["IBM"]) if is_dict else ["IBM"]
+    full_load = bool(event.get("full_load", False)) if is_dict else False
 
     try:
         stock_pipeline = StockPipeline()
@@ -650,6 +687,7 @@ def lambda_handler(event, context):
         results = stock_pipeline.run(
             execution_start_time=execution_start_time,
             stock_symbols=stock_symbols,
+            full_load=full_load,
         )
 
         successful = [r["symbol"] for r in results if "error" not in r]

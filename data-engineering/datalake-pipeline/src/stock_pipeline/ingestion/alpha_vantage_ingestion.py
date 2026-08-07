@@ -108,6 +108,7 @@ class AlphaVantageIngestion:
         function: str,
         dataset: str,
         execution_start_time: datetime,
+        outputsize: str = "full",
     ) -> dict:
         """
         Fetch API response for a given stock symbol and API function,
@@ -118,6 +119,9 @@ class AlphaVantageIngestion:
             function: Alpha Vantage API function name (e.g., 'TIME_SERIES_DAILY', 'OVERVIEW').
             dataset: Target dataset partition folder name (e.g., 'daily_time_series').
             execution_start_time: Pipeline start timestamp for deterministic partitioning.
+            outputsize: API payload size for time series endpoints:
+                        - 'full': Full historical load (20+ years of daily data).
+                        - 'compact': Incremental load (last 100 daily data points).
 
         Returns:
             dict: S3 upload result metadata payload from the loader.
@@ -134,9 +138,13 @@ class AlphaVantageIngestion:
             "apikey": api_key,
         }
 
+        # For time-series endpoints, pass outputsize ('full' for 20+ years history, 'compact' for last 100 days)
+        if "TIME_SERIES" in function.upper():
+            params["outputsize"] = outputsize
+
         logger.info(
-            "[INGEST][API_REQUEST] Ingesting symbol=%s, function=%s, dataset=%s",
-            symbol, function, dataset,
+            "[INGEST][API_REQUEST] Ingesting symbol=%s, function=%s, dataset=%s, outputsize=%s",
+            symbol, function, dataset, params.get("outputsize", "N/A"),
         )
 
         # Step 2: Call REST API via extractor
