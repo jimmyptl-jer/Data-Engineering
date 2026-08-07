@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Alpha Vantage Data Lake Pipeline
+  Bronze → Silver → Gold ETL pipeline with incremental processing
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 3072
+    Runtime: python3.9
+    Environment:
+      Variables:
+        S3_BUCKET_NAME: !Ref S3BucketName
+        LOG_LEVEL: INFO
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Default: graywolf--data--lake
+    Description: S3 bucket for Bronze/Silver/Gold data lake storage
+
+  AlphaVantageApiKey:
+    Type: String
+    NoEcho: true
+    Description: Primary Alpha Vantage API key
+
+  StockSymbols:
+    Type: String
+    Default: "IBM"
+    Description: Comma-separated list of stock symbols to process
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 14 ? * MON-FRI *)"
+    Description: EventBridge schedule (default = 2 PM UTC weekdays, after US market close)
+
+  EnableSchedule:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable or disable the scheduled EventBridge trigger
+
+# ============================================================
+# CONDITIONS
+# ============================================================
+
+Conditions:
+  IsScheduleEnabled: !Equals [!Ref EnableSchedule, "true"]
+
+# ============================================================
+# RESOURCES
+# ============================================================
+
+Resources:
+
+  # ----------------------------------------------------------
+  # LAMBDA FUNCTION
+  # ----------------------------------------------------------
+
+  StockPipelineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: stock-data-pipeline
+      Handler: src.stock_pipeline.app.lambda_handler
+      CodeUri: .
+      Description: Alpha Vantage Data Lake Pipeline — Bronze → Silver → Gold ETL
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          ALPHA_VANTAGE_API_KEY: !Ref AlphaVantageApiKey
+          S3_BUCKET_NAME: !Ref S3BucketName
+      Policies:
+        - Statement:
+            - Sid: S3DataLakeAccess
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:ListBucket
+              Resource:
+                - !Sub "arn:aws:s3:::${S3BucketName}"
+                - !Sub "arn:aws:s3:::${S3BucketName}/*"
+      Events:
+        ScheduledRun:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: Scheduled ETL pipeline execution
+            Enabled: !If [IsScheduleEnabled, true, false]
+            Input: !Sub '{"stock_symbols": ["${StockSymbols}"]}'
+
+  # ----------------------------------------------------------
+  # CLOUDWATCH LOG GROUP (Explicit — sets retention)
+  # ----------------------------------------------------------
+
+  StockPipelineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StockPipelineFunction}"
+      RetentionInDays: 30
+
+  # ----------------------------------------------------------
+  # CLOUDWATCH ALARM — Lambda Errors
+  # ----------------------------------------------------------
+
+  StockPipelineErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: stock-pipeline-errors
+      AlarmDescription: Triggers when the stock pipeline Lambda function errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref StockPipelineFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # ----------------------------------------------------------
+  # CLOUDWATCH ALARM — Lambda Duration (close to timeout)
+  # ----------------------------------------------------------
+
+  StockPipelineDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: stock-pipeline-duration-warning
+      AlarmDescription: Triggers when pipeline execution exceeds 12 minutes (close to 15 min timeout)
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref StockPipelineFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 720000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+
+Outputs:
+  StockPipelineFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt StockPipelineFunction.Arn
+
+  StockPipelineFunctionName:
+    Description: Lambda function name
+    Value: !Ref StockPipelineFunction
+
+  LogGroupName:
+    Description: CloudWatch Log Group for pipeline logs
+    Value: !Ref StockPipelineLogGroup
