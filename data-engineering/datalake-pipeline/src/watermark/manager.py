@@ -278,3 +278,9 @@ class WatermarkManager:
     #   - Read existing watermark -> get stored overview_hash
     #   - Compare new hash vs old hash
     #   - Return True if changed (or no prior watermark), False if unchanged
+    
+    def compute_content_hash():
+        pass
+    
+    def hash_changed():
+        pass

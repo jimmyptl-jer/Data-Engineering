@@ -164,27 +164,33 @@ class StockDataExtractor:
             logger.debug("[EXTRACT][PATH_CHECK] Path existence check exception for %s: %s", path_str, e)
             return False
 
-    def _bronze_bucket_key(self, dataset: str, execution_start_time: datetime) -> str:
+    def _bronze_bucket_key(
+        self,
+        datasource: str, 
+        dataset: str, 
+        execution_start_time: datetime,
+        run_id:str
+        ) -> str:
         """
         Build fully qualified S3 URI prefix for Bronze layer partitions.
 
         Args:
-            dataset: Dataset folder name (e.g. 'daily_time_series').
+            dataset: Dataset folder name (e.g. 'daily_time_series').                                                                    
             execution_start_time: Execution start timestamp for partitioning.
 
         Returns:
             str: S3 URI string formatted as `s3a://{bucket}/stock/bronze/...`
         """
+        
+        ingestion_date = execution_start_time.strftime("%Y-%m-%d")
+        
         return (
             f"s3a://{self.bucket_name}/"
             f"stock/bronze/"
-            f"source=alphavantage/"
+            f"source={datasource}/"
             f"dataset={dataset}/"
-            f"year={execution_start_time.year}/"
-            f"month={execution_start_time.month:02d}/"
-            f"day={execution_start_time.day:02d}/"
-            f"hour={execution_start_time.hour:02d}/"
-            f"minute={execution_start_time.minute:02d}/"
+            f"ingestion_date={ingestion_date}/"
+            f"run_id={run_id}/"
         )
 
     def _silver_bucket_key(
@@ -285,44 +291,12 @@ class StockDataExtractor:
     # BRONZE LAYER EXTRACTORS
     # ============================================================
 
-    def extract_bronze_weekly_data(
-        self, dataset: str, execution_start_time: datetime,
-    ) -> DataFrame:
-        """
-        Extract raw weekly time-series JSON files from Bronze S3 partition into a Spark DataFrame.
-
-        Args:
-            dataset: Dataset partition folder name.
-            execution_start_time: Execution start timestamp.
-
-        Returns:
-            DataFrame: Spark DataFrame matching `stock_schema_weekly`.
-        """
-        bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
-        logger.info("[EXTRACT][BRONZE_WEEKLY] Reading JSON files from: %s", bucket_key)
-
-        if not self._path_exists(bucket_key):
-            logger.warning("[EXTRACT][BRONZE_WEEKLY_SKIP] Path does not exist: %s. Returning empty DataFrame.", bucket_key)
-            return self.spark.createDataFrame([], schema=stock_schema_weekly)
-
-        try:
-            df = (
-                self.spark.read
-                .format("json")
-                .option("multiLine", "true")
-                .schema(stock_schema_weekly)
-                .option("recursiveFileLookup", "true")
-                .load(bucket_key)
-            )
-            logger.info("[EXTRACT][BRONZE_WEEKLY_OK] Extraction completed.")
-            return df
-
-        except Exception as e:
-            logger.exception("[EXTRACT][BRONZE_WEEKLY_FAIL] Failed reading weekly data: %s", e)
-            raise
-
     def extract_bronze_daily_data(
-        self, dataset: str, execution_start_time: datetime,
+        self,
+        datasource:str,
+        dataset: str, 
+        execution_start_time: datetime,
+        batch_id:str
     ) -> DataFrame:
         """
         Extract raw daily time-series JSON files from Bronze S3 partition into a Spark DataFrame.
@@ -334,7 +308,7 @@ class StockDataExtractor:
         Returns:
             DataFrame: Spark DataFrame matching `stock_schema_daily`.
         """
-        bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
+        bucket_key = self._bronze_bucket_key(datasource,dataset, execution_start_time,run_id=batch_id)
         logger.info("[EXTRACT][BRONZE_DAILY] Reading JSON files from: %s", bucket_key)
 
         if not self._path_exists(bucket_key):
@@ -356,9 +330,52 @@ class StockDataExtractor:
         except Exception as e:
             logger.exception("[EXTRACT][BRONZE_DAILY_FAIL] Failed reading daily data: %s", e)
             raise
+        
+    def extract_bronze_exchange_data(
+        self,
+        datasource:str,
+        dataset: str, 
+        execution_start_time: datetime,
+        batch_id:str
+        ) -> DataFrame:
+            """
+            Extract raw daily time-series JSON files from Bronze S3 partition into a Spark DataFrame.
+    
+            Args:
+                dataset: Dataset partition folder name.
+                execution_start_time: Execution start timestamp.
+    
+            Returns:
+                DataFrame: Spark DataFrame matching `stock_schema_daily`.
+            """
+            bucket_key = self._bronze_bucket_key(datasource,dataset, execution_start_time,run_id=batch_id)
+            logger.info("[EXTRACT][BRONZE_DAILY] Reading JSON files from: %s", bucket_key)
+    
+            if not self._path_exists(bucket_key):
+                logger.warning("[EXTRACT][BRONZE_DAILY_SKIP] S3 partition path does not exist: %s. Returning empty DataFrame.", bucket_key)
+                return self.spark.createDataFrame([], schema=stock_schema_daily)
+    
+            try:
+                df = (
+                    self.spark.read
+                    .format("json")
+                    .option("multiLine", "true")
+                    .option("recursiveFileLookup", "true")
+                    .load(bucket_key)
+                )
+                logger.info("[EXTRACT][BRONZE_DAILY_OK] Extraction completed.")
+                return df
+    
+            except Exception as e:
+                logger.exception("[EXTRACT][BRONZE_DAILY_FAIL] Failed reading daily data: %s", e)
+                raise
 
     def extract_bronze_overview_data(
-        self, dataset: str, execution_start_time: datetime,
+        self,
+        datasource:str,
+        dataset: str, 
+        execution_start_time: datetime,
+        batch_id:str
     ) -> DataFrame:
         """
         Extract raw company overview JSON files from Bronze S3 partition into a Spark DataFrame.
@@ -370,7 +387,7 @@ class StockDataExtractor:
         Returns:
             DataFrame: Spark DataFrame matching `stock_overview_schema`.
         """
-        bucket_key = self._bronze_bucket_key(dataset, execution_start_time)
+        bucket_key = self._bronze_bucket_key(datasource,dataset, execution_start_time,run_id=batch_id)
         logger.info("[EXTRACT][BRONZE_OVERVIEW] Reading JSON files from: %s", bucket_key)
 
         if not self._path_exists(bucket_key):
@@ -398,7 +415,11 @@ class StockDataExtractor:
     # ============================================================
 
     def extract_silver_daily_data_parquet(
-        self, dataset: str, execution_start_time: datetime,
+        self,
+        datasource:str,
+        dataset: str, 
+        execution_start_time: datetime,
+        batch_id:str
     ) -> DataFrame:
         """
         Extract processed daily time-series Parquet files from Silver S3 layer.

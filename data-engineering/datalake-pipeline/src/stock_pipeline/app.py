@@ -31,6 +31,8 @@ from .load import StockDataLoader
 from .utils import APIKeyManager
 from .ingestion.alpha_vantage_ingestion import AlphaVantageIngestion
 
+from .ingestion.massive_ingestion import MassiveIngestion
+
 from src.watermark.manager import WatermarkManager
 
 # ============================================================
@@ -212,6 +214,11 @@ class StockPipeline:
                 loader=self.loader,
                 bucket_name=self.s3_bucket_name,
             )
+            
+            self.ingest_massive = MassiveIngestion(
+                loader=self.loader,
+                bucket_name=self.s3_bucket_name
+            )
 
             logger.info("[PIPELINE] StockPipeline initialized successfully. S3 Bucket: %s", self.s3_bucket_name)
 
@@ -223,11 +230,11 @@ class StockPipeline:
     # INGESTION LAYER
     # ============================================================
 
-    def _ingest_from_api(
+    def _ingest_from_alphavantage_api(
         self,
+        batch_id:str,
         stock_symbols: list[str],
         execution_start_time: datetime,
-        full_load: bool = False,
     ) -> list[dict]:
         """
         Fetch raw market data from Alpha Vantage API for all symbols and endpoints,
@@ -255,10 +262,12 @@ class StockPipeline:
 
                 try:
                     response = self.ingestion.ingest(
-                        symbol,
+                        symbol=symbol,
                         function=function,
                         dataset=dataset,
+                        datasource="alphavantage",
                         execution_start_time=execution_start_time,
+                        run_id=batch_id
                     )
 
                     results.append({
@@ -280,6 +289,197 @@ class StockPipeline:
 
         logger.info("[INGEST] Ingestion cycle completed. Total requests processed: %d.", len(results))
         return results
+    
+
+    def _ingest_from_massive_api(
+        self,
+        batch_id: str,
+        execution_start_time: datetime,
+        symbol: str,
+    ) -> list[dict]:
+        """
+        Ingest all configured datasets from the Massive API.
+
+        Args:
+            batch_id:
+                Unique identifier for the current pipeline batch.
+
+            execution_start_time:
+                Timestamp when the pipeline execution started.
+
+            symbol:
+                Stock symbol used for symbol-specific endpoints.
+
+        Returns:
+            List containing the ingestion results.
+        """
+
+        results = []
+
+        try:
+            logger.info(
+                "[INGEST] Starting Massive API ingestion | batch_id=%s",
+                batch_id,
+            )
+
+            # =========================================================
+            # 1. EXCHANGES
+            # =========================================================
+
+            response = self.ingest_massive.ingest_exchanges(
+                datasource="massive",
+                execution_start_time=execution_start_time,
+                run_id=batch_id,
+            )
+
+            print("\n[MASSIVE] exchanges:", response)
+
+            results.append({
+                "source": "massive",
+                "dataset": "exchanges",
+                "batch_id": batch_id,
+                "status": "SUCCESS" if response is not None else "FAILED",
+                "response": response,
+            })
+
+            # =========================================================
+            # 2. AGGREGATES
+            # =========================================================
+
+            response = self.ingest_massive.ingest_aggregates(
+                datasource="massive",
+                symbol=symbol,
+                execution_start_time=execution_start_time,
+                run_id=batch_id,
+                multiplier=1,
+                timespan="day",
+                from_date="2026-07-20",
+                to_date="2026-08-10",
+            )
+
+            print("\n[MASSIVE] aggregates:", response)
+
+            results.append({
+                "source": "massive",
+                "dataset": "aggregates",
+                "batch_id": batch_id,
+                "status": "SUCCESS" if response is not None else "FAILED",
+                "response": response,
+            })
+
+
+        
+            # =========================================================
+            # 6. SPLITS
+            # =========================================================
+
+            response = self.ingest_massive.ingest_splits(
+                datasource="massive",
+                execution_start_time=execution_start_time,
+                run_id=batch_id,
+                symbol=symbol,
+            )
+
+            print("\n[MASSIVE] splits:", response)
+
+            results.append({
+                "source": "massive",
+                "dataset": "splits",
+                "batch_id": batch_id,
+                "status": "SUCCESS" if response is not None else "FAILED",
+                "response": response,
+            })
+
+            # =========================================================
+            # 7. DIVIDENDS
+            # =========================================================
+
+            response = self.ingest_massive.ingest_dividends(
+                datasource="massive",
+                execution_start_time=execution_start_time,
+                run_id=batch_id,
+                symbol=symbol,
+            )
+
+            print("\n[MASSIVE] dividends:", response)
+
+            results.append({
+                "source": "massive",
+                "dataset": "dividends",
+                "batch_id": batch_id,
+                "status": "SUCCESS" if response is not None else "FAILED",
+                "response": response,
+            })
+
+            # =========================================================
+            # 10. TICKER REFERENCE
+            # =========================================================
+
+            response = self.ingest_massive.ingest_list_tickers(
+                datasource="massive",
+                execution_start_time=execution_start_time,
+                run_id=batch_id,
+            )
+
+            print("\n[MASSIVE] ticker_reference:", response)
+
+            results.append({
+                "source": "massive",
+                "dataset": "ticker_reference",
+                "batch_id": batch_id,
+                "status": "SUCCESS" if response is not None else "FAILED",
+                "response": response,
+            })
+
+            
+            # =========================================================
+            # PRINT COMPLETE RESULTS
+            # =========================================================
+
+            print("\n")
+            print("=" * 100)
+            print("MASSIVE API INGESTION - COMPLETE RESULTS")
+            print("=" * 100)
+
+            for result in results:
+                print(
+                    f"Dataset : {result.get('dataset')}\n"
+                    f"Source  : {result.get('source')}\n"
+                    f"Batch   : {result.get('batch_id')}\n"
+                    f"Status  : {result.get('status')}\n"
+                    f"Response: {result.get('response')}\n"
+                )
+                print("-" * 100)
+
+            print("=" * 100)
+            print(
+                f"Total datasets processed: {len(results)}"
+            )
+            print("=" * 100)
+
+            logger.info(
+                "[INGEST] Massive API ingestion completed | "
+                "batch_id=%s | datasets=%s",
+                batch_id,
+                len(results),
+            )
+
+        except Exception as e:
+            logger.exception(
+                "[INGEST] Error during Massive API ingestion | "
+                "batch_id=%s | error=%s",
+                batch_id,
+                str(e),
+            )
+
+            results.append({
+                "source": "massive",
+                "batch_id": batch_id,
+                "status": "FAILED",
+                "error": str(e),
+            })
+
+        return results
 
     # ============================================================
     # DAILY DATASET — Date-Based Watermark Incremental
@@ -287,6 +487,7 @@ class StockPipeline:
 
     def _process_daily_dataset(
         self,
+        datasource:str,
         execution_start_time: datetime,
         batch_id: str,
     ) -> bool:
@@ -314,10 +515,12 @@ class StockPipeline:
 
         # 1. Extract raw JSON from Bronze layer into PySpark DataFrame
         extracted_daily_data = self.extractor.extract_bronze_daily_data(
+            datasource,
             daily_dataset,
             execution_start_time=execution_start_time,
+            batch_id=batch_id
         )
-
+        
         # 2. Retrieve existing watermark value (if present)
         watermark_value = None
 
@@ -393,12 +596,72 @@ class StockPipeline:
         logger.info("[DAILY] Bronze-to-Silver daily processing cycle completed successfully.")
         return True
 
+    def _process_exchanges_dataset(
+            self,
+            datasource:str,
+            execution_start_time: datetime,
+            batch_id: str,
+        ) -> bool:
+            
+            dataset = "exchanges"
+            pipeline_name = "bronze_to_silver"
+    
+            logger.info("[DAILY] Starting Bronze-to-Silver cycle for dataset=%s.", dataset)
+    
+            
+            extracted_exchange_data = self.extractor.extract_bronze_exchange_data(
+                datasource,
+                dataset,
+                execution_start_time=execution_start_time,
+                batch_id=batch_id
+            )
+    
+            extracted_exchange_data.printSchema()
+        
+            # 2. Retrieve existing watermark value (if present)
+            watermark_value = None
+    
+            if self.watermark_manager.watermark_exists(pipeline_name, dataset):
+                daily_watermark = self.watermark_manager.read_watermark(
+                    pipeline_name=pipeline_name,
+                    dataset_name=dataset,
+                )
+                watermark_value = daily_watermark.get("watermark_value")
+    
+                logger.info(
+                    "[DAILY] Existing watermark found: watermark_value=%s. Executing incremental load.",
+                    watermark_value,
+                )
+            else:
+                logger.info("[DAILY] No prior watermark found. Executing full historical load.")
+    
+            watermark_col_value = execution_start_time.strftime("%Y-%m-%d")
+            # 7. Persist updated watermark payload
+            self.watermark_manager.write_watermark(
+                watermark={
+                    "pipeline_name": pipeline_name,
+                    "dataset_name": dataset,
+                    "watermark_column": "exchange",
+                    "watermark_value": watermark_col_value,
+                    "last_processed_at": execution_start_time.isoformat(),
+                    "batch_id": batch_id,
+                    "status": "SUCCESS",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_by": "stock_pipeline",
+                    "remarks": "Bronze to Silver completed successfully.",
+                },
+            )
+    
+            logger.info("[DAILY] Bronze-to-Silver daily processing cycle completed successfully.")
+            return True
+    
     # ============================================================
     # OVERVIEW DATASET — Hash-Based Change Detection Incremental
     # ============================================================
 
     def _process_overview_dataset(
         self,
+        datasource,
         execution_start_time: datetime,
         batch_id: str,
     ) -> bool:
@@ -426,8 +689,10 @@ class StockPipeline:
 
         # 1. Extract raw JSON overview from Bronze layer
         extracted_overview_data = self.extractor.extract_bronze_overview_data(
-            overview_dataset,
+            datasource=datasource,
+            dataset=overview_dataset,
             execution_start_time=execution_start_time,
+            batch_id=batch_id
         )
 
         # 2. Transform raw overview JSON into typed Silver DataFrame
@@ -611,18 +876,29 @@ class StockPipeline:
 
         try:
             # Step 1: API Ingestion -> Bronze
-            results = self._ingest_from_api(
+            results = self._ingest_from_alphavantage_api(
+                batch_id,
                 stock_symbols,
                 execution_start_time,
             )
+            
+            results_massive = self._ingest_from_massive_api(
+                batch_id,
+                execution_start_time,
+                symbol="IBM"
+            )
 
             # Step 2: Bronze -> Silver Daily Time Series
-            daily_written = self._process_daily_dataset(execution_start_time, batch_id)
+            daily_written = self._process_daily_dataset("alphavantage",execution_start_time, batch_id)
             logger.info("[PIPELINE] Daily Silver output written: %s", daily_written)
+            
+            exchange_processing = self._process_exchanges_dataset("massive",execution_start_time,batch_id)
+
 
             # Step 3: Bronze -> Silver Company Overview
-            overview_written = self._process_overview_dataset(execution_start_time, batch_id)
+            overview_written = self._process_overview_dataset("alphavantage",execution_start_time, batch_id)
             logger.info("[PIPELINE] Overview Silver output written: %s", overview_written)
+            
 
             # Step 4: Silver -> Gold Unified Dataset
             self._build_gold_layer(execution_start_time)
@@ -652,6 +928,8 @@ class StockPipeline:
                 stock_symbols,
                 successful_count,
                 failed_count,
+                results_massive,
+                exchange_processing,
                 "WRITTEN (New Records Found)" if daily_written else "SKIPPED (No New Records)",
                 "WRITTEN" if overview_written else "SKIPPED",
             )

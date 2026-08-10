@@ -11,11 +11,10 @@ Description: >
 Globals:
   Function:
     Timeout: 900
-    MemorySize: 3072
-    Runtime: python3.9
+    MemorySize: 3008
+    Runtime: python3.14
     Environment:
       Variables:
-        S3_BUCKET_NAME: !Ref S3BucketName
         LOG_LEVEL: INFO
 
 # ============================================================
@@ -34,11 +33,7 @@ Parameters:
 
   S3BucketName:
     Type: String
-    Default: graywolf--data--lake
-
-  AlphaVantageApiKey:
-    Type: String
-    NoEcho: true
+    Default: graywolf-stock-data-bucket
 
   StockSymbols:
     Type: String
@@ -54,6 +49,56 @@ Parameters:
     AllowedValues:
       - "true"
       - "false"
+
+  AlphaVantageApiKey:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey1:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey2:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey3:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey4:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey5:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey6:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey7:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey8:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey9:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey10:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey11:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey12:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey13:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey14:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey15:
+    Type: String
+    NoEcho: true
+
 # ============================================================
 # CONDITIONS
 # ============================================================
@@ -67,13 +112,88 @@ Conditions:
 
 Resources:
   # ----------------------------------------------------------
+  # SNS TOPIC — Alarm notifications
+  # ----------------------------------------------------------
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "stock-pipeline-alerts-${EnvironmentName}"
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+
+  # ----------------------------------------------------------
+  # S3 DATA LAKE BUCKET
+  # ----------------------------------------------------------
+
+  DatalakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+
+      VersioningConfiguration:
+        Status: Enabled
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+        - Key: DataClassification
+          Value: Internal
+
+      LifecycleConfiguration:
+        Rules:
+          - Id: BronzeToSilverTransition
+            Status: Enabled
+            Prefix: stock/bronze
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 180
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+              - TransitionInDays: 2555
+                StorageClass: DEEP_ARCHIVE
+
+          - Id: SilverToGoldTransition
+            Status: Enabled
+            Prefix: stock/silver
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 180
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+              - TransitionInDays: 2555
+                StorageClass: DEEP_ARCHIVE
+
+  # ----------------------------------------------------------
   # LAMBDA FUNCTION
   # ----------------------------------------------------------
 
   StockPipelineFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: stock-data-pipeline
+      FunctionName: !Sub "stock-data-pipeline-${EnvironmentName}"
 
       Handler: src.stock_pipeline.app.lambda_handler
 
@@ -85,20 +205,11 @@ Resources:
         - x86_64
 
       Tags:
-        - Key: Project
-          Value: AlphaVantage-DataLake
-
-        - Key: Environment
-          Value: Development
-
-        - Key: Owner
-          Value: Jimmy Patel
-
-        - Key: ManagedBy
-          Value: AWS SAM
-
-        - Key: DataClassification
-          Value: Internal
+        Project: AlphaVantage-DataLake
+        Environment: !Ref EnvironmentName
+        Owner: Jimmy Patel
+        ManagedBy: AWS SAM
+        DataClassification: Internal
 
       Environment:
         Variables:
@@ -118,8 +229,7 @@ Resources:
           ALPHA_VANTAGE_API_KEY_13: !Ref AlphaVantageApiKey13
           ALPHA_VANTAGE_API_KEY_14: !Ref AlphaVantageApiKey14
           ALPHA_VANTAGE_API_KEY_15: !Ref AlphaVantageApiKey15
-
-          S3_BUCKET_NAME: !Ref S3BucketName
+          S3_BUCKET_NAME: !Ref DatalakeBucket
 
       Policies:
         - Statement:
@@ -131,8 +241,9 @@ Resources:
                 - s3:DeleteObject
                 - s3:ListBucket
               Resource:
-                - !Sub "arn:aws:s3:::${S3BucketName}"
-                - !Sub "arn:aws:s3:::${S3BucketName}/*"
+                - !GetAtt DatalakeBucket.Arn
+                - !Sub "${DatalakeBucket.Arn}/*"
+
       Events:
         ScheduledRun:
           Type: Schedule
@@ -141,71 +252,6 @@ Resources:
             Description: Scheduled ETL pipeline execution
             Enabled: !If [IsScheduleEnabled, true, false]
             Input: !Sub '{"stock_symbols": ["${StockSymbols}"]}'
-
-  DatalakeBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref S3BucketName
-
-      VersioningConfiguration:
-        Status: Enabled
-
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-
-      Tags:
-        - Key: Project
-          Value: AlphaVantage-DataLake
-
-        - Key: Environment
-          Value: Development
-
-        - Key: Owner
-          Value: Jimmy Patel
-
-        - Key: ManagedBy
-          Value: AWS SAM
-
-        - Key: DataClassification
-          Value: Internal
-
-      LifecycleConfiguration:
-        Rules:
-          - Id: BronzeToSilverTransition
-            Status: Enabled
-            Prefix: stock/bronze
-             Transitions:
-
-                - TransitionInDays: 30
-                  StorageClass: STANDARD_IA
-
-                - TransitionInDays: 180
-                  StorageClass: GLACIER_IR
-
-                - TransitionInDays: 365
-                  StorageClass: GLACIER
-
-                - TransitionInDays: 2555
-                  StorageClass: DEEP_ARCHIVE
-          
-          - Id: SilverToGoldTransition
-            Status: Enabled
-            Prefix: stock/silver
-             Transitions:
-
-                - TransitionInDays: 30
-                  StorageClass: STANDARD_IA
-
-                - TransitionInDays: 180
-                  StorageClass: GLACIER_IR
-
-                - TransitionInDays: 365
-                  StorageClass: GLACIER
-
-                - TransitionInDays: 2555
-                  StorageClass: DEEP_ARCHIVE
 
   # ----------------------------------------------------------
   # CLOUDWATCH LOG GROUP (Explicit — sets retention)
@@ -224,7 +270,7 @@ Resources:
   StockPipelineErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: stock-pipeline-errors
+      AlarmName: !Sub "stock-pipeline-errors-${EnvironmentName}"
       AlarmDescription: Triggers when the stock pipeline Lambda function errors
       Namespace: AWS/Lambda
       MetricName: Errors
@@ -237,21 +283,19 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: AlphaVantage-DataLake
-
         - Key: Environment
-          Value: Development
-
+          Value: !Ref EnvironmentName
         - Key: Owner
           Value: Jimmy Patel
-
         - Key: ManagedBy
           Value: AWS SAM
-
-        - Key: DataClassification
-          Value: Internal
 
   # ----------------------------------------------------------
   # CLOUDWATCH ALARM — Lambda Duration (close to timeout)
@@ -260,7 +304,7 @@ Resources:
   StockPipelineDurationAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: stock-pipeline-duration-warning
+      AlarmName: !Sub "stock-pipeline-duration-warning-${EnvironmentName}"
       AlarmDescription: Triggers when pipeline execution exceeds 12 minutes (close to 15 min timeout)
       Namespace: AWS/Lambda
       MetricName: Duration
@@ -273,21 +317,17 @@ Resources:
       Threshold: 720000
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: AlphaVantage-DataLake
-
         - Key: Environment
-          Value: Development
-
+          Value: !Ref EnvironmentName
         - Key: Owner
           Value: Jimmy Patel
-
         - Key: ManagedBy
           Value: AWS SAM
-
-        - Key: DataClassification
-          Value: Internal
 
 # ============================================================
 # OUTPUTS
@@ -305,3 +345,11 @@ Outputs:
   LogGroupName:
     Description: CloudWatch Log Group for pipeline logs
     Value: !Ref StockPipelineLogGroup
+
+  DatalakeBucketName:
+    Description: S3 data lake bucket name
+    Value: !Ref DatalakeBucket
+
+  AlertTopicArn:
+    Description: SNS topic for pipeline alerts — subscribe your email/Slack webhook here
+    Value: !Ref AlertTopic

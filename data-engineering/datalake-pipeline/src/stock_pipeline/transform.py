@@ -32,6 +32,9 @@ import logging
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
+
+from pyspark.sql.window import Window
+
 from pyspark.sql.functions import (
     col,
     current_timestamp,
@@ -49,6 +52,14 @@ from pyspark.sql.functions import (
     current_date,
     date_sub,
     from_utc_timestamp,
+    lit,
+    coalesce,
+    concat_ws,
+    sha2,
+    regexp_replace,
+    split,
+    lag,
+    lead
 )
 
 from pyspark.sql.types import (
@@ -369,17 +380,17 @@ class StockDataTransformer:
                 col("daily_data.`5. volume`").alias("volume"),
             )
 
-            # ------------------------------------------------------------------
-            # Step 3: Watermark Filter (Incremental Load Optimization)
-            # ------------------------------------------------------------------
-            if watermark_value is not None:
-                logger.info(
-                    "[TRANSFORM][DAILY_WATERMARK] Applying date watermark filter: day_date > '%s'.",
-                    watermark_value,
-                )
-                stock_df = stock_df.filter(col("day_date") > watermark_value)
-            else:
-                logger.info("[TRANSFORM][DAILY_WATERMARK] No watermark provided — executing full historical load.")
+            # # ------------------------------------------------------------------
+            # # Step 3: Watermark Filter (Incremental Load Optimization)
+            # # ------------------------------------------------------------------
+            # if watermark_value is not None:
+            #     logger.info(
+            #         "[TRANSFORM][DAILY_WATERMARK] Applying date watermark filter: day_date > '%s'.",
+            #         watermark_value,
+            #     )
+            #     stock_df = stock_df.filter(col("day_date") > watermark_value)
+            # else:
+            #     logger.info("[TRANSFORM][DAILY_WATERMARK] No watermark provided — executing full historical load.")
 
             # ------------------------------------------------------------------
             # Step 4: String Cleaning & Fake Null Normalization
@@ -571,6 +582,32 @@ class StockDataTransformer:
                 .withColumn("month", month(col("day_date")))
                 .withColumn("day", dayofmonth(col("day_date")))
             )
+            
+            sṭock_window = (
+                Window
+                .partitionBy("symbol")
+                .orderBy("day_date")
+            )
+            
+            valid_stock_df = (
+                valid_stock_df
+                .withColumn(
+                    "previous_close",
+                    lag("close",1).over(sṭock_window)
+                )
+                .withColumn(
+                    "previous_open",
+                    lag("open",1).over(sṭock_window)
+                )
+                .withColumn(
+                    "previous_high",
+                    lag("high",1).over(sṭock_window)
+                )
+                .withColumn(
+                    "previous_low",
+                    lag("low",1).over(sṭock_window)
+                )
+            )
 
             # ------------------------------------------------------------------
             # Step 15: Final Silver Column Selection & Sorting
@@ -599,6 +636,10 @@ class StockDataTransformer:
                 "month",
                 "day",
                 "processed_at",
+                "previous_close",
+                "previous_open",
+                "previous_high",
+                "previous_low"
             )
 
             valid_stock_df = valid_stock_df.orderBy(
@@ -698,6 +739,25 @@ class StockDataTransformer:
         "DividendDate": "dividend_date",
         "ExDividendDate": "ex_dividend_date",
     }
+    
+    overview_hash_columns = [
+        "symbol", "asset_type", "company_name", "cik", "exchange", "currency",
+        "country", "sector", "industry", "official_site", "fiscal_year_end",
+        "latest_quarter", "market_cap", "ebitda", "pe_ratio", "peg_ratio",
+        "book_value", "dividend_per_share", "dividend_yield", "eps",
+        "revenue_per_share_ttm", "profit_margin", "operating_margin_ttm",
+        "return_on_assets_ttm", "return_on_equity_ttm", "revenue_ttm",
+        "gross_profit_ttm", "diluted_eps_ttm", "quarterly_earnings_growth_yoy",
+        "quarterly_revenue_growth_yoy", "analyst_target_price",
+        "analyst_rating_strong_buy", "analyst_rating_buy", "analyst_rating_hold",
+        "analyst_rating_sell", "analyst_rating_strong_sell", "trailing_pe",
+        "forward_pe", "price_to_sales_ratio_ttm", "price_to_book_ratio",
+        "ev_to_revenue", "ev_to_ebitda", "beta", "fifty_two_week_high",
+        "fifty_two_week_low", "fifty_day_moving_average",
+        "two_hundred_day_moving_average", "shares_outstanding", "shares_float",
+        "percent_insiders", "percent_institutions", "dividend_date",
+        "ex_dividend_date",
+    ]
 
     def silver_transform_overview(
         self,
@@ -705,6 +765,37 @@ class StockDataTransformer:
     ) -> DataFrame:
         """
         Transform Alpha Vantage Company Overview Bronze data into a cleaned, typed Silver DataFrame.
+
+        Overview Transform
+        │
+        ├── Step 1
+        │   Rename Columns
+        │
+        ├── Step 2
+        │   Trim String Columns
+        │
+        ├── Step 3
+        │   Regex Cleaning
+        │
+        ├── Step 4
+        │   Standardize Case
+        │
+        ├── Step 5
+        │   Clean Numeric Columns
+        │
+        ├── Step 6
+        │   Type Casting
+        │
+        ├── Step 7
+        │   Null Handling
+        │
+        ├── Step 8
+        │   Data Validation
+        │
+        ├── Step 9
+        │   Add Audit Columns
+        │
+        └── Return DataFrame
 
         Execution Steps:
           1. Select 52 business columns.
@@ -729,35 +820,93 @@ class StockDataTransformer:
             # Step 1: Select business columns
             # ------------------------------------------------------------------
             data_df = data_df.select(*self.OVERVIEW_BUSINESS_COLUMNS)
-
+           
+            # ------------------------------------------------------------------
+            # Step 7: Rename to snake_case column names
+            # ------------------------------------------------------------------
+            for old_name, new_name in self.OVERVIEW_COLUMN_MAPPING.items():
+                if old_name in data_df.columns:
+                    data_df = data_df.withColumnRenamed(old_name, new_name)
+            
             # ------------------------------------------------------------------
             # Step 2: Trim strings & uppercase symbol
             # ------------------------------------------------------------------
             string_columns = [
-                "Symbol",
-                "AssetType",
-                "Name",
-                "Exchange",
-                "Currency",
-                "Country",
-                "Sector",
-                "Industry",
-                "OfficialSite",
-                "FiscalYearEnd",
+                "symbol", 
+                "asset_type", 
+                "company_name", 
+                "exchange", 
+                "currency",
+                "country", 
+                "sector", 
+                "industry", 
+                "fiscal_year_end",
             ]
+
 
             for col_name in string_columns:
                 data_df = data_df.withColumn(col_name, trim(col(col_name)))
-                data_df = data_df.withColumn(col_name, col(col_name).cast(StringType()))
+                            
+            for column in string_columns:
+                data_df = data_df.withColumn(
+                    column,
+                    regexp_replace(
+                        col(column),
+                        "[^A-Za-z &]",
+                        ""
+                    )
+                )
+                
+            data_df = data_df.withColumn(
+                "symbol",
+                upper(col("symbol"))    
+            )
+            
+            data_df = data_df.withColumn(
+                "exchange",
+                upper(col("exchange"))    
+            )
+            
+            data_df = data_df.withColumn(
+                "currency",
+                upper(col("currency"))    
+            )
+            
+            data_df = data_df.withColumn(
+                "asset_type",
+                split(
+                    col("asset_type"),
+                    " "
+                )[1]
+            )
+            
+            data_df = data_df.withColumn(
+                "company_name",
+                lower(col("company_name"))
+            )
+            
+            data_df = data_df.withColumn(
+                "industry",
+                lower(col("industry"))
+            )
+            
+            data_df = data_df.withColumn(
+                "fiscal_year_end",
+                lower(col("fiscal_year_end"))
+            )
+            
+            data_df = data_df.withColumn(
+                "sector",
+                lower(col("sector"))
+            )
 
-            data_df = data_df.withColumn("Symbol", upper(col("Symbol")))
-
+            
             # ------------------------------------------------------------------
             # Step 3: Normalize Fake Nulls
             # ------------------------------------------------------------------
             fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
-            for col_name in self.OVERVIEW_BUSINESS_COLUMNS:
+            for col_name in self.overview_hash_columns:
                 data_df = data_df.withColumn(
                     col_name,
                     when(
@@ -770,65 +919,42 @@ class StockDataTransformer:
             # Step 4: Impute Missing Defaults
             # ------------------------------------------------------------------
             data_df = data_df.fillna({
-                "Country": "Unknown",
-                "Sector": "Unknown",
-                "Industry": "Unknown",
-                "OfficialSite": "Not Available",
+                "country": "Unknown",
+                "sector": "Unknown",
+                "industry": "Unknown",
+                "official_site": "Not Available",
             })
 
             # ------------------------------------------------------------------
             # Step 5: Explicit Data Type Casting
             # ------------------------------------------------------------------
             integer_columns = [
-                "CIK",
-                "AnalystRatingStrongBuy",
-                "AnalystRatingBuy",
-                "AnalystRatingHold",
-                "AnalystRatingSell",
-                "AnalystRatingStrongSell",
+                "cik", "analyst_rating_strong_buy", "analyst_rating_buy",
+                "analyst_rating_hold", "analyst_rating_sell",
+                "analyst_rating_strong_sell",
             ]
 
             long_columns = [
-                "MarketCapitalization",
-                "EBITDA",
-                "RevenueTTM",
-                "GrossProfitTTM",
-                "SharesOutstanding",
-                "SharesFloat",
+                "market_cap", "ebitda", "revenue_ttm", "gross_profit_ttm",
+                "shares_outstanding", "shares_float",
             ]
 
             double_columns = [
-                "PERatio",
-                "PEGRatio",
-                "BookValue",
-                "DividendPerShare",
-                "DividendYield",
-                "EPS",
-                "RevenuePerShareTTM",
-                "ProfitMargin",
-                "OperatingMarginTTM",
-                "ReturnOnAssetsTTM",
-                "ReturnOnEquityTTM",
-                "DilutedEPSTTM",
-                "QuarterlyEarningsGrowthYOY",
-                "QuarterlyRevenueGrowthYOY",
-                "AnalystTargetPrice",
-                "TrailingPE",
-                "ForwardPE",
-                "PriceToSalesRatioTTM",
-                "PriceToBookRatio",
-                "EVToRevenue",
-                "EVToEBITDA",
-                "Beta",
-                "52WeekHigh",
-                "52WeekLow",
-                "50DayMovingAverage",
-                "200DayMovingAverage",
-                "PercentInsiders",
-                "PercentInstitutions",
+                "pe_ratio", "peg_ratio", "book_value", "dividend_per_share",
+                "dividend_yield", "eps", "revenue_per_share_ttm", "profit_margin",
+                "operating_margin_ttm", "return_on_assets_ttm",
+                "return_on_equity_ttm", "diluted_eps_ttm",
+                "quarterly_earnings_growth_yoy", "quarterly_revenue_growth_yoy",
+                "analyst_target_price", "trailing_pe", "forward_pe",
+                "price_to_sales_ratio_ttm", "price_to_book_ratio",
+                "ev_to_revenue", "ev_to_ebitda", "beta", "fifty_two_week_high",
+                "fifty_two_week_low", "fifty_day_moving_average",
+                "two_hundred_day_moving_average", "percent_insiders",
+                "percent_institutions",
             ]
 
-            date_columns = ["LatestQuarter", "DividendDate", "ExDividendDate"]
+
+            date_columns = ["latest_quarter", "dividend_date", "ex_dividend_date"]      
 
             for c in integer_columns:
                 data_df = data_df.withColumn(c, col(c).cast(IntegerType()))
@@ -841,7 +967,10 @@ class StockDataTransformer:
 
             for c in date_columns:
                 data_df = data_df.withColumn(c, to_date(col(c), "yyyy-MM-dd"))
-
+            
+            
+                
+           
             # ------------------------------------------------------------------
             # Step 6: Partitioning Metadata (year, month, day)
             # ------------------------------------------------------------------
@@ -852,13 +981,7 @@ class StockDataTransformer:
                 .withColumn("day", dayofmonth(current_date()))
             )
 
-            # ------------------------------------------------------------------
-            # Step 7: Rename to snake_case column names
-            # ------------------------------------------------------------------
-            for old_name, new_name in self.OVERVIEW_COLUMN_MAPPING.items():
-                if old_name in data_df.columns:
-                    data_df = data_df.withColumnRenamed(old_name, new_name)
-
+            
             # ------------------------------------------------------------------
             # Step 8: Add Processed Timestamp
             # ------------------------------------------------------------------
@@ -872,4 +995,4 @@ class StockDataTransformer:
 
         except Exception as e:
             logger.exception("[TRANSFORM][OVERVIEW_FAIL] Error transforming overview data: %s", e)
-            raise
+            raise()

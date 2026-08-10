@@ -107,8 +107,9 @@ class AlphaVantageIngestion:
         symbol: str,
         function: str,
         dataset: str,
+        datasource:str,
         execution_start_time: datetime,
-        outputsize: str = "full",
+        run_id:str
     ) -> dict:
         """
         Fetch API response for a given stock symbol and API function,
@@ -138,12 +139,9 @@ class AlphaVantageIngestion:
             "apikey": api_key,
         }
 
-        # For time-series endpoints, pass outputsize ('full' for 20+ years history, 'compact' for last 100 days)
-        if "TIME_SERIES" in function.upper():
-            params["outputsize"] = outputsize
 
         logger.info(
-            "[INGEST][API_REQUEST] Ingesting symbol=%s, function=%s, dataset=%s, outputsize=%s",
+            "[INGEST][API_REQUEST] Ingesting symbol=%s, function=%s, dataset=%s",
             symbol, function, dataset, params.get("outputsize", "N/A"),
         )
 
@@ -166,17 +164,16 @@ class AlphaVantageIngestion:
                 f"{data[error_key]}"
             )
 
+        ingestion_date = execution_start_time.strftime("%Y-%m-%d")
+        
         # Step 4: Construct hierarchical S3 Bronze object key
         bucket_key = (
             f"stock/"
             f"bronze/"
-            f"source=alphavantage/"
+            f"source={datasource}/"
             f"dataset={dataset}/"
-            f"year={execution_start_time.year}/"
-            f"month={execution_start_time.month:02d}/"
-            f"day={execution_start_time.day:02d}/"
-            f"hour={execution_start_time.hour:02d}/"
-            f"minute={execution_start_time.minute:02d}/"
+            f"ingestion_date={ingestion_date}/"
+            f"run_id={run_id}/"
             f"{symbol.upper()}.json"
         )
 
@@ -184,6 +181,5 @@ class AlphaVantageIngestion:
         return self.loader.upload_raw_to_s3(
             data,
             self.bucket_name,
-            stock_symbol=symbol,
             bucket_key=bucket_key,
         )
