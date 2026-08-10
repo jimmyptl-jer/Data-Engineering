@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Alpha Vantage Data Lake Pipeline
@@ -23,25 +23,30 @@ Globals:
 # ============================================================
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Development
+      - QA
+      - UAT
+      - Production
+
   S3BucketName:
     Type: String
     Default: graywolf--data--lake
-    Description: S3 bucket for Bronze/Silver/Gold data lake storage
 
   AlphaVantageApiKey:
     Type: String
     NoEcho: true
-    Description: Primary Alpha Vantage API key
 
   StockSymbols:
     Type: String
     Default: "IBM"
-    Description: Comma-separated list of stock symbols to process
 
   ScheduleExpression:
     Type: String
     Default: "cron(0 14 ? * MON-FRI *)"
-    Description: EventBridge schedule (default = 2 PM UTC weekdays, after US market close)
 
   EnableSchedule:
     Type: String
@@ -49,8 +54,6 @@ Parameters:
     AllowedValues:
       - "true"
       - "false"
-    Description: Enable or disable the scheduled EventBridge trigger
-
 # ============================================================
 # CONDITIONS
 # ============================================================
@@ -63,7 +66,6 @@ Conditions:
 # ============================================================
 
 Resources:
-
   # ----------------------------------------------------------
   # LAMBDA FUNCTION
   # ----------------------------------------------------------
@@ -72,15 +74,53 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: stock-data-pipeline
+
       Handler: src.stock_pipeline.app.lambda_handler
+
       CodeUri: .
+
       Description: Alpha Vantage Data Lake Pipeline — Bronze → Silver → Gold ETL
+
       Architectures:
         - x86_64
+
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+
+        - Key: Environment
+          Value: Development
+
+        - Key: Owner
+          Value: Jimmy Patel
+
+        - Key: ManagedBy
+          Value: AWS SAM
+
+        - Key: DataClassification
+          Value: Internal
+
       Environment:
         Variables:
           ALPHA_VANTAGE_API_KEY: !Ref AlphaVantageApiKey
+          ALPHA_VANTAGE_API_KEY_1: !Ref AlphaVantageApiKey1
+          ALPHA_VANTAGE_API_KEY_2: !Ref AlphaVantageApiKey2
+          ALPHA_VANTAGE_API_KEY_3: !Ref AlphaVantageApiKey3
+          ALPHA_VANTAGE_API_KEY_4: !Ref AlphaVantageApiKey4
+          ALPHA_VANTAGE_API_KEY_5: !Ref AlphaVantageApiKey5
+          ALPHA_VANTAGE_API_KEY_6: !Ref AlphaVantageApiKey6
+          ALPHA_VANTAGE_API_KEY_7: !Ref AlphaVantageApiKey7
+          ALPHA_VANTAGE_API_KEY_8: !Ref AlphaVantageApiKey8
+          ALPHA_VANTAGE_API_KEY_9: !Ref AlphaVantageApiKey9
+          ALPHA_VANTAGE_API_KEY_10: !Ref AlphaVantageApiKey10
+          ALPHA_VANTAGE_API_KEY_11: !Ref AlphaVantageApiKey11
+          ALPHA_VANTAGE_API_KEY_12: !Ref AlphaVantageApiKey12
+          ALPHA_VANTAGE_API_KEY_13: !Ref AlphaVantageApiKey13
+          ALPHA_VANTAGE_API_KEY_14: !Ref AlphaVantageApiKey14
+          ALPHA_VANTAGE_API_KEY_15: !Ref AlphaVantageApiKey15
+
           S3_BUCKET_NAME: !Ref S3BucketName
+
       Policies:
         - Statement:
             - Sid: S3DataLakeAccess
@@ -101,6 +141,71 @@ Resources:
             Description: Scheduled ETL pipeline execution
             Enabled: !If [IsScheduleEnabled, true, false]
             Input: !Sub '{"stock_symbols": ["${StockSymbols}"]}'
+
+  DatalakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+
+      VersioningConfiguration:
+        Status: Enabled
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+
+        - Key: Environment
+          Value: Development
+
+        - Key: Owner
+          Value: Jimmy Patel
+
+        - Key: ManagedBy
+          Value: AWS SAM
+
+        - Key: DataClassification
+          Value: Internal
+
+      LifecycleConfiguration:
+        Rules:
+          - Id: BronzeToSilverTransition
+            Status: Enabled
+            Prefix: stock/bronze
+             Transitions:
+
+                - TransitionInDays: 30
+                  StorageClass: STANDARD_IA
+
+                - TransitionInDays: 180
+                  StorageClass: GLACIER_IR
+
+                - TransitionInDays: 365
+                  StorageClass: GLACIER
+
+                - TransitionInDays: 2555
+                  StorageClass: DEEP_ARCHIVE
+          
+          - Id: SilverToGoldTransition
+            Status: Enabled
+            Prefix: stock/silver
+             Transitions:
+
+                - TransitionInDays: 30
+                  StorageClass: STANDARD_IA
+
+                - TransitionInDays: 180
+                  StorageClass: GLACIER_IR
+
+                - TransitionInDays: 365
+                  StorageClass: GLACIER
+
+                - TransitionInDays: 2555
+                  StorageClass: DEEP_ARCHIVE
 
   # ----------------------------------------------------------
   # CLOUDWATCH LOG GROUP (Explicit — sets retention)
@@ -132,6 +237,21 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+
+        - Key: Environment
+          Value: Development
+
+        - Key: Owner
+          Value: Jimmy Patel
+
+        - Key: ManagedBy
+          Value: AWS SAM
+
+        - Key: DataClassification
+          Value: Internal
 
   # ----------------------------------------------------------
   # CLOUDWATCH ALARM — Lambda Duration (close to timeout)
@@ -153,6 +273,21 @@ Resources:
       Threshold: 720000
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+
+        - Key: Environment
+          Value: Development
+
+        - Key: Owner
+          Value: Jimmy Patel
+
+        - Key: ManagedBy
+          Value: AWS SAM
+
+        - Key: DataClassification
+          Value: Internal
 
 # ============================================================
 # OUTPUTS
