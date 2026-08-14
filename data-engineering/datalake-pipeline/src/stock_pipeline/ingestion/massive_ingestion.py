@@ -58,7 +58,7 @@ class MassiveIngestion:
         self.client = RESTClient(get_key())
 
         logger.info(
-            "[INGEST][MASSIVE_INIT] MassiveIngestion initialized | bucket=%s",
+            "[INGESTION][MASSIVE][INIT] MassiveIngestion initialized | bucket=%s",
             bucket_name,
         )
 

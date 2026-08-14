@@ -46,7 +46,6 @@ _RAW_API_KEYS = [
 ]
 
 # Filter out unset environment variable slots (`None` or empty strings)
-# This prevents passing `None` as the apikey param, which would trigger API error responses.
 API_KEYS = [key for key in _RAW_API_KEYS if key]
 
 if not API_KEYS:
@@ -57,24 +56,24 @@ if not API_KEYS:
 
 if len(API_KEYS) < len(_RAW_API_KEYS):
     logger.warning(
-        "[INGEST][KEY_POOL] %d of %d API key slots were unconfigured and excluded from rotation.",
+        "[INGESTION][ALPHAVANTAGE][KEY_POOL] %d of %d API key slots unconfigured.",
         len(_RAW_API_KEYS) - len(API_KEYS),
         len(_RAW_API_KEYS),
     )
 
-logger.info("[INGEST][KEY_POOL_READY] Loaded %d valid Alpha Vantage API key(s) into rotation pool.", len(API_KEYS))
+logger.info(
+    "[INGESTION][ALPHAVANTAGE][KEY_POOL_READY] Loaded %d valid API key(s) into pool.",
+    len(API_KEYS),
+)
 
 
 def get_key() -> str:
     """
     Randomly select and return a valid API key from the active rotation pool.
-
-    Returns:
-        str: Alpha Vantage API key.
     """
     key = random.choice(API_KEYS)
     logger.debug(
-        "[INGEST][KEY_ISSUED] Issued key ending in: ...%s",
+        "[INGESTION][ALPHAVANTAGE][KEY_ISSUED] Issued key ending in: ...%s",
         key[-4:] if len(key) > 4 else "****",
     )
     return key
@@ -90,14 +89,6 @@ class AlphaVantageIngestion:
     """
 
     def __init__(self, extractor, loader, bucket_name: str):
-        """
-        Initialize the Ingestion component.
-
-        Args:
-            extractor: Extractor object instance (`StockDataExtractor`) for REST API calls.
-            loader: Loader object instance (`StockDataLoader`) for boto3 S3 writes.
-            bucket_name: Target S3 bucket name.
-        """
         self.extractor = extractor
         self.loader = loader
         self.bucket_name = bucket_name
@@ -107,30 +98,14 @@ class AlphaVantageIngestion:
         symbol: str,
         function: str,
         dataset: str,
-        datasource:str,
+        datasource: str,
         execution_start_time: datetime,
-        run_id:str
+        run_id: str,
     ) -> dict:
         """
         Fetch API response for a given stock symbol and API function,
         validate payload, and write raw JSON to S3 Bronze layer.
-
-        Args:
-            symbol: Stock ticker symbol (e.g., 'IBM').
-            function: Alpha Vantage API function name (e.g., 'TIME_SERIES_DAILY', 'OVERVIEW').
-            dataset: Target dataset partition folder name (e.g., 'daily_time_series').
-            execution_start_time: Pipeline start timestamp for deterministic partitioning.
-            outputsize: API payload size for time series endpoints:
-                        - 'full': Full historical load (20+ years of daily data).
-                        - 'compact': Incremental load (last 100 daily data points).
-
-        Returns:
-            dict: S3 upload result metadata payload from the loader.
-
-        Raises:
-            ValueError: If Alpha Vantage returns an error payload or rate-limit notification.
         """
-        # Step 1: Obtain random key from key pool
         api_key = get_key()
 
         params = {
@@ -139,21 +114,19 @@ class AlphaVantageIngestion:
             "apikey": api_key,
         }
 
-
         logger.info(
-            "[INGEST][API_REQUEST] Ingesting symbol=%s, function=%s, dataset=%s",
-            symbol, function, dataset, params.get("outputsize", "N/A"),
+            "[INGESTION][ALPHAVANTAGE] Fetching symbol=%s function=%s dataset=%s",
+            symbol,
+            function,
+            dataset,
         )
 
-        # Step 2: Call REST API via extractor
         data = self.extractor.fetch_alpha_vantage_api_data(params=params)
 
-        # Step 3: Guard against rate-limit / error payloads
         error_key = next((k for k in ALPHA_VANTAGE_ERROR_KEYS if k in data), None)
         if error_key:
             logger.error(
-                "[INGEST_ERR][ALPHA_VANTAGE_ERROR] API returned error response instead of data. "
-                "Symbol: %s, Function: %s, Error Key: %s, Message: %s",
+                "[INGESTION][ALPHAVANTAGE][ERROR] API error for symbol=%s function=%s key=%s message=%s",
                 symbol,
                 function,
                 error_key,
@@ -165,8 +138,7 @@ class AlphaVantageIngestion:
             )
 
         ingestion_date = execution_start_time.strftime("%Y-%m-%d")
-        
-        # Step 4: Construct hierarchical S3 Bronze object key
+
         bucket_key = (
             f"stock/"
             f"bronze/"
@@ -177,7 +149,6 @@ class AlphaVantageIngestion:
             f"{symbol.upper()}.json"
         )
 
-        # Step 5: Upload raw JSON payload to S3 Bronze layer
         return self.loader.upload_raw_to_s3(
             data,
             self.bucket_name,
