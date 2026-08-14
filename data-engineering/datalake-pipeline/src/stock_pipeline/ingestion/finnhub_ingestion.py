@@ -161,20 +161,41 @@ class FinnHubIngestion:
         This method:
             1. Calls Finnhub's stock_symbols() endpoint for the given exchange.
             2. Validates the API response is non-empty.
-            3. Serializes the response into JSON format.
+            3. Prepares the response as Python dictionaries.
             4. Builds an S3 key following the Bronze partition convention.
-            5. Uploads the raw JSON payload to S3.
+            5. Uploads the raw payload to S3.
+            6. The S3 loader serializes the payload to JSON exactly once.
 
         Args:
-            exchange: Exchange code to query (e.g., 'US' for US exchanges).
-            execution_start_time: Pipeline start timestamp for partition key generation.
-            run_id: Unique batch identifier (e.g., 'batch_20260814_053000').
+            exchange:
+                Exchange code to query (e.g., 'US' for US exchanges).
+
+            execution_start_time:
+                Pipeline start timestamp for partition key generation.
+
+            run_id:
+                Unique batch identifier
+                (e.g., 'batch_20260814_053000').
 
         Returns:
-            dict: S3 upload response metadata if successful.
-            list: Empty list if API returned no data.
-            None: If the ingestion failed entirely.
+            dict:
+                S3 upload response metadata if successful.
+
+            list:
+                Empty list if API returned no data.
+
+            None:
+                If the ingestion failed entirely.
         """
+
+        # ============================================================
+        # STEP 1: START INGESTION
+        # ============================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 1: START FINNHUB INGESTION")
+        print("=" * 80)
+
         logger.info(
             "[INGEST][STOCKS_LIST] Starting ingestion | "
             "exchange=%s | run_id=%s",
@@ -183,9 +204,15 @@ class FinnHubIngestion:
         )
 
         try:
-            # -------------------------------------------------
-            # Step 1: Fetch stock symbols from Finnhub API
-            # -------------------------------------------------
+
+            # ========================================================
+            # STEP 2: FETCH DATA FROM FINNHUB
+            # ========================================================
+
+            print("\n" + "=" * 80)
+            print("STEP 2: FETCH STOCK SYMBOLS FROM FINNHUB")
+            print("=" * 80)
+
             logger.info(
                 "[INGEST][STOCKS_LIST] Fetching stock symbols | "
                 "exchange=%s",
@@ -195,13 +222,27 @@ class FinnHubIngestion:
             response = []
 
             try:
-                # Finnhub returns a list of dicts with keys:
-                # currency, description, displaySymbol, figi, mic, symbol, type
+                # Finnhub returns a list of dictionaries containing
+                # fields such as:
+                #
+                # currency
+                # description
+                # displaySymbol
+                # figi
+                # mic
+                # symbol
+                # type
+
                 response = self.finnhub_client.stock_symbols(
                     exchange
                 )
 
             except Exception:
+
+                print("\n" + "!" * 80)
+                print("FINNHUB API FETCH FAILED")
+                print("!" * 80)
+
                 logger.exception(
                     "[INGEST][STOCKS_LIST] Failed to fetch stock symbols | "
                     "exchange=%s | records=%d | run_id=%s",
@@ -210,16 +251,28 @@ class FinnHubIngestion:
                     run_id,
                 )
 
-                # If we got partial data before the error, continue with it
+                # If we received partial data before the error,
+                # continue processing it.
                 if response:
+
+                    print("\n" + "-" * 80)
+                    print("PARTIAL RESPONSE FOUND")
+                    print("-" * 80)
+
                     logger.warning(
                         "[INGEST][STOCKS_LIST] Continuing with partial response | "
                         "records=%d | run_id=%s",
                         len(response),
                         run_id,
                     )
+
                 else:
                     return None
+
+            print("\n" + "-" * 80)
+            print("FINNHUB API FETCH COMPLETED")
+            print(f"Records received: {len(response)}")
+            print("-" * 80)
 
             logger.info(
                 "[INGEST][STOCKS_LIST] Fetch completed | "
@@ -229,17 +282,34 @@ class FinnHubIngestion:
                 run_id,
             )
 
-            # -------------------------------------------------
-            # Step 2: Validate — ensure we got data back
-            # -------------------------------------------------
+            # ========================================================
+            # STEP 3: VALIDATE RESPONSE
+            # ========================================================
+
+            print("\n" + "=" * 80)
+            print("STEP 3: VALIDATE FINNHUB RESPONSE")
+            print("=" * 80)
+
+            # Ensure that the API returned data.
             if not response:
+
+                print("\n" + "!" * 80)
+                print("FINNHUB RETURNED AN EMPTY RESPONSE")
+                print("!" * 80)
+
                 logger.warning(
                     "[INGEST][STOCKS_LIST] Empty API response | "
                     "exchange=%s | run_id=%s",
                     exchange,
                     run_id,
                 )
+
                 return []
+
+            print("\n" + "-" * 80)
+            print("RESPONSE VALIDATION PASSED")
+            print(f"Records validated: {len(response)}")
+            print("-" * 80)
 
             logger.info(
                 "[INGEST][STOCKS_LIST] Response validation completed | "
@@ -247,46 +317,93 @@ class FinnHubIngestion:
                 len(response),
             )
 
-            # -------------------------------------------------
-            # Step 3: Serialize response to JSON string
-            #
-            # Finnhub returns native Python dicts/lists, so we
-            # can serialize directly with json.dumps(). We also
-            # handle edge cases where the response might be a
-            # dataclass or object with __dict__.
-            # -------------------------------------------------
+            # ========================================================
+            # STEP 4: PREPARE DATA
+            # ========================================================
 
-            # Handle non-list response types (edge cases)
+            print("\n" + "=" * 80)
+            print("STEP 4: PREPARE DATA FOR S3")
+            print("=" * 80)
+
+            # --------------------------------------------------------
+            # Important:
+            #
+            # We DO NOT call json.dumps() here.
+            #
+            # The data remains a Python object:
+            #
+            # list[dict]
+            #
+            # The S3 loader will perform the single JSON
+            # serialization before uploading to S3.
+            # --------------------------------------------------------
+
+            # Handle non-list response types as edge cases.
             if isinstance(response, dict):
+
+                print("\n" + "-" * 80)
+                print("RESPONSE IS A DICTIONARY")
+                print("-" * 80)
+
                 return response
 
             if is_dataclass(response):
+
+                print("\n" + "-" * 80)
+                print("RESPONSE IS A DATACLASS")
+                print("-" * 80)
+
                 return asdict(response)
 
             if hasattr(response, "__dict__"):
+
+                print("\n" + "-" * 80)
+                print("RESPONSE IS AN OBJECT")
+                print("-" * 80)
+
                 return dict(response.__dict__)
 
-            # Standard case: serialize the list of dicts to a JSON string
-            data = json.dumps(response)
+            # Standard Finnhub case:
+            #
+            # response = list[dict]
+            #
+            # Keep it as a Python object.
+            data = response
+
+            print("\n" + "-" * 80)
+            print("DATA PREPARATION COMPLETED")
+            print(f"Records prepared: {len(data)}")
+            print("-" * 80)
 
             logger.info(
-                "[INGEST][STOCKS_LIST] Data serialized | bytes=%d",
+                "[INGEST][STOCKS_LIST] Data prepared | "
+                "records=%d",
                 len(data),
             )
 
-            logger.debug(
-                "[INGEST][STOCKS_LIST] First record preview: %s",
-                data[0],
-            )
+            # Preview first record for debugging.
+            if data:
 
-            # -------------------------------------------------
-            # Step 4: Build the S3 Bronze partition key
-            #
-            # Key format:
-            #   stock/bronze/source=finnhub/dataset=ticker_reference/
-            #   ingestion_date=YYYY-MM-DD/run_id=batch_xxx/data.json
-            # -------------------------------------------------
-            ingestion_date = execution_start_time.strftime("%Y-%m-%d")
+                print("\n" + "-" * 80)
+                print("FIRST RECORD PREVIEW")
+                print("-" * 80)
+
+                logger.debug(
+                    "[INGEST][STOCKS_LIST] First record preview: %s",
+                    data[0],
+                )
+
+            # ========================================================
+            # STEP 5: BUILD S3 BRONZE KEY
+            # ========================================================
+
+            print("\n" + "=" * 80)
+            print("STEP 5: BUILD BRONZE S3 KEY")
+            print("=" * 80)
+
+            ingestion_date = execution_start_time.strftime(
+                "%Y-%m-%d"
+            )
 
             bucket_key = (
                 f"stock/"
@@ -298,17 +415,27 @@ class FinnHubIngestion:
                 f"data.json"
             )
 
+            print("\n" + "-" * 80)
+            print("BRONZE S3 KEY CREATED")
+            print(f"s3://{self.bucket_name}/{bucket_key}")
+            print("-" * 80)
+
             logger.debug(
                 "[INGEST][STOCKS_LIST] Bronze key=%s",
                 bucket_key,
             )
 
-            # -------------------------------------------------
-            # Step 5: Upload raw JSON to S3 Bronze layer
-            # -------------------------------------------------
+            # ========================================================
+            # STEP 6: UPLOAD DATA TO S3
+            # ========================================================
+
+            print("\n" + "=" * 80)
+            print("STEP 6: UPLOAD DATA TO S3 BRONZE")
+            print("=" * 80)
+
             logger.info(
                 "[INGEST][STOCKS_LIST] Uploading data to Bronze | "
-                "bytes=%d | run_id=%s",
+                "records=%d | run_id=%s",
                 len(data),
                 run_id,
             )
@@ -318,6 +445,14 @@ class FinnHubIngestion:
                 bucket_name=self.bucket_name,
                 bucket_key=bucket_key,
             )
+
+            # ========================================================
+            # STEP 7: INGESTION COMPLETED
+            # ========================================================
+
+            print("\n" + "=" * 80)
+            print("FINNHUB INGESTION COMPLETED SUCCESSFULLY")
+            print("=" * 80)
 
             logger.info(
                 "[INGEST][STOCKS_LIST] Ingestion completed successfully | "
@@ -329,10 +464,16 @@ class FinnHubIngestion:
             return result
 
         except Exception:
+
+            print("\n" + "!" * 80)
+            print("FINNHUB INGESTION FAILED")
+            print("!" * 80)
+
             logger.exception(
                 "[INGEST][STOCKS_LIST] Ingestion failed | "
                 "exchange=%s | run_id=%s",
                 exchange,
                 run_id,
             )
+
             return None

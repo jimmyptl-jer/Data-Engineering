@@ -4,24 +4,103 @@ Daily Time Series — Bronze-to-Silver Transformation Module.
 Transforms raw Bronze Alpha Vantage Daily Stock Data (JSON format)
 into a clean, typed, validated, and enriched Silver DataFrame stored in Parquet/CSV.
 
-Detailed ETL Processing Sequence:
-  Step 1:  Flatten Nested JSON  ──► Explode `Time Series (Daily)` map into key (date) and value (OHLCV struct).
-  Step 2:  Column Selection     ──► Extract symbol, date, open, high, low, close, volume fields.
-  Step 3:  Watermark Filter     ──► If watermark provided, keep only rows where `day_date > watermark_value`.
-  Step 4:  String Cleaning      ──► Trim whitespace and uppercase stock symbol.
-  Step 5:  Fake Null Handling   ──► Convert invalid text like `"n/a"`, `"none"`, `"-"` into true PySpark `NULL`.
-  Step 6:  Type Casting         ──► Cast strings to explicit data types (`DateType`, `DoubleType`, `LongType`).
-  Step 7:  Data Quality Audit   ──► Apply business rules to mark rows as `VALID` or `INVALID` (Quarantine pattern).
-  Step 8:  Filter Valid Rows    ──► Keep `VALID` rows for Silver output; log count of quarantined rows.
-  Step 9:  Deduplication        ──► Drop duplicates on `(symbol, day_date)` composite key.
-  Step 10: Rounding             ──► Round financial price metrics to 2 decimal places.
-  Step 11: Metric Enrichment    ──► Compute `daily_change`, `daily_change_percentage`, and `market_movement` (Bull/Bear).
-  Step 12: Rolling 30-Day Avg   ──► Calculate 30-day rolling average for open and close prices per symbol.
-  Step 13: Rolling 52-Week Range──► Calculate 52-week high and low prices per symbol.
-  Step 14: All-Time High/Low    ──► Calculate all-time high and low prices per symbol.
-  Step 15: Lag Computations     ──► Use Window functions to calculate `previous_open`, `previous_close`, etc.
-  Step 16: Partition Keys       ──► Extract `year`, `month`, `day` columns for S3 partitioning.
-  Step 17: Final Schema Selection──► Order and select Silver-ready columns.
+Daily Time Series — Bronze-to-Silver Transformation Module.
+
+Transforms raw Bronze Alpha Vantage Daily Time Series data from Bronze JSON
+into a clean, typed, validated, and enriched Silver-ready PySpark DataFrame.
+
+Transformation Flow:
+    1. Flatten nested JSON structure
+    2. Select + alias OHLCV fields
+    3. Trim whitespace
+    4. Normalize fake-null tokens
+    5. Data type conversions
+    6. Apply validation rules
+    7. Generate validation_reason
+    8. Filter valid rows for Silver layer
+    9. Deduplicate on business key
+    10. Round financial prices
+    11. Financial metric enrichment
+    12. Rolling 30-day average open & close
+    13. Rolling 52-week high & low
+    14. All-time high & low
+    15. Partition keys & lag features
+    16. Final Silver schema selection & sorting
+    17. Row count metrics
+    18. Return Silver DataFrame
+
+Dataset:
+  - `daily_time_series`
+
+Fields Processed:
+
+  Source JSON Structure:
+    {
+        "Meta Data": {
+            "2. Symbol": "IBM",
+            "3. Last Refreshed": "2026-08-14"
+        },
+        "Time Series (Daily)": {
+            "2026-08-14": {
+                "1. open": "192.50",
+                "2. high": "195.20",
+                "3. low": "191.80",
+                "4. close": "194.10",
+                "5. volume": "1250000"
+            }
+        }
+    }
+
+  root
+    |-- Meta Data: struct (nullable = true)
+    |    |-- 2. Symbol: string (nullable = true)
+    |    |-- 3. Last Refreshed: string (nullable = true)
+    |-- Time Series (Daily): map (nullable = true)
+    |    |-- key: string
+    |    |-- value: struct
+    |    |    |-- 1. open: string (nullable = true)
+    |    |    |-- 2. high: string (nullable = true)
+    |    |    |-- 3. low: string (nullable = true)
+    |    |    |-- 4. close: string (nullable = true)
+    |    |    |-- 5. volume: string (nullable = true)
+
+  Silver Output Schema:
+    symbol                    STRING
+    day_date                  DATE
+    open                      DOUBLE
+    high                      DOUBLE
+    low                       DOUBLE
+    close                     DOUBLE
+    volume                    LONG
+    daily_change              DOUBLE
+    daily_change_percentage   DOUBLE
+    market_movement           STRING
+    thirty_day_avg_open       DOUBLE
+    thirty_day_avg_close      DOUBLE
+    fifty_two_week_high       DOUBLE
+    fifty_two_week_low        DOUBLE
+    all_time_high             DOUBLE
+    all_time_low              DOUBLE
+    last_refreshed_date       DATE
+    validation_status         STRING
+    validation_reason         STRING
+    year                      INTEGER
+    month                     INTEGER
+    day                       INTEGER
+    processed_at              TIMESTAMP
+    previous_close            DOUBLE
+    previous_open             DOUBLE
+    previous_high             DOUBLE
+    previous_low              DOUBLE
+
+    +------+----------+------+------+------+------+-------+------------+------------------------+---------------+-----------------+
+    |symbol|  day_date|  open|  high|   low| close| volume|daily_change|daily_change_percentage|market_movement|validation_status|
+    +------+----------+------+------+------+------+-------+------------+------------------------+---------------+-----------------+
+    |   IBM|2026-08-14|192.50|195.20|191.80|194.10|1250000|        1.60|                    0.83|           Bull|            VALID|
+    |   IBM|2026-08-13|191.00|193.50|190.20|192.50| 980000|        1.50|                    0.79|           Bull|            VALID|
+    |  AAPL|2026-08-14|175.30|178.90|174.50|177.20|2100000|        1.90|                    1.08|           Bull|            VALID|
+    +------+----------+------+------+------+------+-------+------------+------------------------+---------------+-----------------+
+
 """
 
 from __future__ import annotations
@@ -62,47 +141,50 @@ def silver_transform_daily_timeseries(
 ) -> DataFrame:
     """
     Transform Alpha Vantage Daily Time Series Bronze data into Silver-ready DataFrame.
-
-    This function performs comprehensive data cleaning, validation, and enrichment:
-      - Flattens nested JSON structures into a relational tabular format.
-      - Applies date-based watermark filtering to process only NEW records.
-      - Normalizes empty strings and fake null values (e.g. 'n/a', 'none', '-') to NULL.
-      - Enforces strict data quality assertions using a quarantine pattern.
-      - Calculates financial technical indicators (30-day averages, 52-week high/low, daily change %).
-      - Computes windowed lag features for previous day's metrics.
-
-    Args:
-        spark (SparkSession): Active PySpark session.
-        daily_dataset (str): Name of the dataset being processed (for logging).
-        data_df (DataFrame): Raw Bronze PySpark DataFrame read from S3 JSON files.
-        watermark_value (str | None): ISO date string ('YYYY-MM-DD') of the last processed record.
-                                      If provided, rows with day_date <= watermark_value are filtered out.
-        debug (bool): If True, logs DataFrame schema and prints top 10 sample rows.
-
-    Returns:
-        DataFrame: Cleaned, validated, and enriched Silver DataFrame ready for S3 parquet/csv write.
-                   Returns an empty DataFrame if all records were filtered by watermark.
     """
-    logger.info("[TRANSFORM][DAILY_START] Starting daily time-series transformation pipeline.")
+
+    # ============================================================
+    # STEP 1: START DAILY TIME SERIES TRANSFORMATION
+    # ============================================================
+
+    print("\n" + "=" * 80)
+    print("STEP 1: DAILY TIME SERIES — BRONZE → SILVER")
+    print("=" * 80)
+
+    logger.info(
+        "[ALPHAVANTAGE][DAILY] Starting Bronze-to-Silver "
+        "transformation."
+    )
 
     try:
-        # ==============================================================================
-        # Step 1: Flatten nested JSON structure
-        # ==============================================================================
-        # Alpha Vantage returns JSON with a `Meta Data` header and a `Time Series (Daily)` map.
-        # We extract the symbol and explode the map to create one row per date.
-        logger.info("[TRANSFORM][DAILY_STEP1] Flattening nested JSON map into tabular rows.")
+
+        # ========================================================
+        # STEP 2: FLATTEN NESTED JSON STRUCTURE
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 2: FLATTEN NESTED JSON STRUCTURE")
+        print("=" * 80)
+
         raw_df = data_df.select(
             col("`Meta Data`.`2. Symbol`").alias("symbol"),
             col("`Meta Data`.`3. Last Refreshed`").alias("last_refreshed"),
             explode(col("Time Series (Daily)")).alias("day_date", "daily_data"),
         )
 
-        # ==============================================================================
-        # Step 2: Select and alias OHLCV fields
-        # ==============================================================================
-        # Extract individual price and volume fields from the exploded struct column
-        logger.info("[TRANSFORM][DAILY_STEP2] Selecting and aliasing OHLCV price & volume fields.")
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Nested JSON flattened into "
+            "tabular rows."
+        )
+
+        # ========================================================
+        # STEP 3: SELECT + ALIAS OHLCV FIELDS
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 3: SELECT + ALIAS OHLCV FIELDS")
+        print("=" * 80)
+
         stock_df = raw_df.select(
             col("symbol"),
             col("last_refreshed"),
@@ -114,10 +196,19 @@ def silver_transform_daily_timeseries(
             col("daily_data.`5. volume`").alias("volume"),
         )
 
-        # ==============================================================================
-        # Step 3: String Cleaning & Whitespace Trimming
-        # ==============================================================================
-        # Remove leading/trailing spaces from string columns and ensure uppercase symbol
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] OHLCV fields selected and "
+            "aliased."
+        )
+
+        # ========================================================
+        # STEP 4: TRIM WHITESPACE
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 4: TRIM WHITESPACE")
+        print("=" * 80)
+
         string_columns = [
             "symbol",
             "last_refreshed",
@@ -132,14 +223,20 @@ def silver_transform_daily_timeseries(
         for column_name in string_columns:
             stock_df = stock_df.withColumn(column_name, trim(col(column_name)))
 
-        # Convert symbol to uppercase (e.g. 'ibm' -> 'IBM') for consistent join keys
         stock_df = stock_df.withColumn("symbol", upper(col("symbol")))
 
-        # ==============================================================================
-        # Step 4: Fake Null Normalization
-        # ==============================================================================
-        # Data APIs often return placeholder strings for missing values instead of true JSON nulls.
-        # We map all known placeholder strings to PySpark `None` (NULL).
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Whitespace trimming completed."
+        )
+
+        # ========================================================
+        # STEP 5: NORMALIZE FAKE NULL VALUES
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 5: NORMALIZE FAKE NULL VALUES")
+        print("=" * 80)
+
         fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
         for column_name in string_columns:
@@ -151,11 +248,18 @@ def silver_transform_daily_timeseries(
                 ).otherwise(col(column_name)),
             )
 
-        # ==============================================================================
-        # Step 5: Data Type Conversions
-        # ==============================================================================
-        # Convert string representations to appropriate Spark SQL data types
-        # Dates -> DateType, Prices -> DoubleType, Volume -> LongType
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Fake-null normalization completed."
+        )
+
+        # ========================================================
+        # STEP 6: DATA TYPE CONVERSIONS
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 6: DATA TYPE CONVERSIONS")
+        print("=" * 80)
+
         stock_df = (
             stock_df
             .withColumn("day_date", to_date(col("day_date"), "yyyy-MM-dd"))
@@ -167,14 +271,18 @@ def silver_transform_daily_timeseries(
             .withColumn("volume", col("volume").cast("long"))
         )
 
-        # ==============================================================================
-        # Step 6: Data Quality Audit (Quarantine Pattern)
-        # ==============================================================================
-        # Evaluate business logic validation rules on each row:
-        #   1. Essential fields must not be NULL (symbol, date, open, high, low, close, volume)
-        #   2. Prices must be strictly positive (> 0)
-        #   3. Volume cannot be negative (>= 0)
-        #   4. High price cannot be lower than Low price (high >= low)
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Type casting completed."
+        )
+
+        # ========================================================
+        # STEP 7: VALIDATION STATUS
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 7: APPLY DATA QUALITY VALIDATION")
+        print("=" * 80)
+
         stock_df = stock_df.withColumn(
             "validation_status",
             when(col("symbol").isNull(), "INVALID")
@@ -194,7 +302,18 @@ def silver_transform_daily_timeseries(
             .otherwise("VALID"),
         )
 
-        # Detailed error message tagging for auditing quarantined records
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Validation status generated."
+        )
+
+        # ========================================================
+        # STEP 8: VALIDATION REASON
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 8: GENERATE VALIDATION REASONS")
+        print("=" * 80)
+
         stock_df = stock_df.withColumn(
             "validation_reason",
             when(col("symbol").isNull(), "Missing symbol")
@@ -214,24 +333,51 @@ def silver_transform_daily_timeseries(
             .otherwise(None),
         )
 
-        # ==============================================================================
-        # Step 7: Filter Valid Rows for Silver Layer
-        # ==============================================================================
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Validation reasons generated."
+        )
+
+        # ========================================================
+        # STEP 9: FILTER VALID ROWS FOR SILVER LAYER
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 9: FILTER VALID ROWS FOR SILVER LAYER")
+        print("=" * 80)
+
         valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
         invalid_record_count = stock_df.filter(col("validation_status") == "INVALID").count()
-        logger.info("[TRANSFORM][DAILY_DQ] Data Quality check completed. Quarantined invalid records: %d", invalid_record_count)
 
-        # ==============================================================================
-        # Step 8: Deduplication
-        # ==============================================================================
-        # Remove duplicate records for the same symbol on the same day
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Valid rows filtered | "
+            "quarantined_invalid_records=%d",
+            invalid_record_count,
+        )
+
+        # ========================================================
+        # STEP 10: DEDUPLICATE
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 10: DEDUPLICATE DAILY TIME SERIES")
+        print("=" * 80)
+
         valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "day_date"])
 
-        # ==============================================================================
-        # Step 9: Rounding Financial Prices
-        # ==============================================================================
-        # Round floating point prices to standard 2 decimal currency places
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Deduplication completed | "
+            "business_key=symbol+day_date"
+        )
+
+        # ========================================================
+        # STEP 11: ROUND FINANCIAL PRICES
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 11: ROUND FINANCIAL PRICES")
+        print("=" * 80)
+
         valid_stock_df = (
             valid_stock_df
             .withColumn("open", round(col("open"), 2))
@@ -240,10 +386,19 @@ def silver_transform_daily_timeseries(
             .withColumn("close", round(col("close"), 2))
         )
 
-        # ==============================================================================
-        # Step 10: Financial Metric Enrichment
-        # ==============================================================================
-        # Compute intraday dollar change, percentage change, and trend direction
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Financial prices rounded to "
+            "2 decimal places."
+        )
+
+        # ========================================================
+        # STEP 12: FINANCIAL METRIC ENRICHMENT
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 12: FINANCIAL METRIC ENRICHMENT")
+        print("=" * 80)
+
         valid_stock_df = (
             valid_stock_df
             .withColumn("daily_change", round(col("close") - col("open"), 2))
@@ -261,14 +416,22 @@ def silver_transform_daily_timeseries(
             .withColumnRenamed("last_refreshed", "last_refreshed_date")
         )
 
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Metric enrichment completed."
+        )
+
         if debug:
-            logger.debug("[TRANSFORM][DAILY] Valid data schema:")
+            logger.debug("[ALPHAVANTAGE][DAILY] Valid data schema:")
             valid_stock_df.printSchema()
 
-        # ==============================================================================
-        # Step 11: Rolling Aggregations — 30-Day Average Open & Close
-        # ==============================================================================
-        logger.info("[TRANSFORM][DAILY_AGG1] Computing 30-day average open/close metrics per symbol.")
+        # ========================================================
+        # STEP 13: ROLLING 30-DAY AVERAGE OPEN & CLOSE
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 13: ROLLING 30-DAY AVERAGE OPEN & CLOSE")
+        print("=" * 80)
+
         recent_stock_df = valid_stock_df.filter(
             col("day_date") >= date_sub(current_date(), 30)
         )
@@ -282,10 +445,18 @@ def silver_transform_daily_timeseries(
             thirty_day_avg_df, on="symbol", how="left",
         )
 
-        # ==============================================================================
-        # Step 12: Rolling Aggregations — 52-Week High & Low
-        # ==============================================================================
-        logger.info("[TRANSFORM][DAILY_AGG2] Computing 52-week high/low metrics per symbol.")
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] 30-day rolling average computed."
+        )
+
+        # ========================================================
+        # STEP 14: ROLLING 52-WEEK HIGH & LOW
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 14: ROLLING 52-WEEK HIGH & LOW")
+        print("=" * 80)
+
         fifty_two_week_df = valid_stock_df.filter(
             col("day_date") >= date_sub(current_date(), 365)
         )
@@ -299,10 +470,18 @@ def silver_transform_daily_timeseries(
             fifty_two_week_agg, on="symbol", how="left",
         )
 
-        # ==============================================================================
-        # Step 13: Rolling Aggregations — All-Time High & Low
-        # ==============================================================================
-        logger.info("[TRANSFORM][DAILY_AGG3] Computing all-time high/low metrics per symbol.")
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] 52-week high/low computed."
+        )
+
+        # ========================================================
+        # STEP 15: ALL-TIME HIGH & LOW
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 15: ALL-TIME HIGH & LOW")
+        print("=" * 80)
+
         all_time_agg = valid_stock_df.groupBy("symbol").agg(
             F.round(F.max("high"), 2).alias("all_time_high"),
             F.round(F.min("low"), 2).alias("all_time_low"),
@@ -312,9 +491,18 @@ def silver_transform_daily_timeseries(
             all_time_agg, on="symbol", how="left",
         )
 
-        # ==============================================================================
-        # Step 14: Partitioning Keys & Window Lag Features
-        # ==============================================================================
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] All-time high/low computed."
+        )
+
+        # ========================================================
+        # STEP 16: PARTITION KEYS & LAG FEATURES
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 16: PARTITION KEYS & LAG FEATURES")
+        print("=" * 80)
+
         valid_stock_df = (
             valid_stock_df
             .withColumn("year", year(col("day_date")))
@@ -322,14 +510,12 @@ def silver_transform_daily_timeseries(
             .withColumn("day", dayofmonth(col("day_date")))
         )
 
-        # Window specification partitioned by symbol and ordered chronologically by day_date
         stock_window = (
             Window
             .partitionBy("symbol")
             .orderBy("day_date")
         )
 
-        # Calculate previous trading session metrics using lag() function
         valid_stock_df = (
             valid_stock_df
             .withColumn(
@@ -350,9 +536,19 @@ def silver_transform_daily_timeseries(
             )
         )
 
-        # ==============================================================================
-        # Step 15: Final Silver Schema Selection & Sorting
-        # ==============================================================================
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Partition keys and lag features "
+            "computed."
+        )
+
+        # ========================================================
+        # STEP 17: FINAL SILVER SCHEMA SELECTION & SORTING
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 17: FINAL SILVER SCHEMA SELECTION & SORTING")
+        print("=" * 80)
+
         valid_stock_df = valid_stock_df.select(
             "symbol",
             "day_date",
@@ -383,21 +579,76 @@ def silver_transform_daily_timeseries(
             "previous_low"
         )
 
-        # Sort output chronologically per stock symbol
         valid_stock_df = valid_stock_df.orderBy(
             col("symbol").asc(),
             col("day_date").desc(),
         )
 
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Final schema selected and sorted | "
+            "columns=%s",
+            valid_stock_df.columns,
+        )
+
         if debug:
-            logger.debug("[TRANSFORM][DAILY] Final Silver DataFrame Schema:")
+            logger.debug("[ALPHAVANTAGE][DAILY] Final Silver DataFrame Schema:")
             valid_stock_df.printSchema()
-            logger.debug("[TRANSFORM][DAILY] Sample Silver DataFrame Rows:")
+            logger.debug("[ALPHAVANTAGE][DAILY] Sample Silver DataFrame Rows:")
             valid_stock_df.show(10, truncate=False)
 
-        logger.info("[TRANSFORM][DAILY_OK] Daily time-series transformation completed successfully.")
+        # ========================================================
+        # STEP 18: ROW COUNT METRICS
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 18: DAILY TIME SERIES ROW COUNT METRICS")
+        print("=" * 80)
+
+        total_in = data_df.count()
+        total_out = valid_stock_df.count()
+
+        valid_count = valid_stock_df.filter(
+            col("validation_status") == "VALID"
+        ).count()
+
+        logger.info(
+            "[ALPHAVANTAGE][DAILY][METRICS] "
+            "total_in=%d | total_out=%d | valid=%d | invalid=%d",
+            total_in,
+            total_out,
+            valid_count,
+            invalid_record_count,
+        )
+
+        print(f"Total In      : {total_in}")
+        print(f"Total Out     : {total_out}")
+        print(f"Valid Records : {valid_count}")
+        print(f"Invalid       : {invalid_record_count}")
+
+        # ========================================================
+        # STEP 19: RETURN SILVER DATAFRAME
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 19: DAILY TIME SERIES TRANSFORMATION COMPLETED")
+        print("=" * 80)
+
+        logger.info(
+            "[ALPHAVANTAGE][DAILY] Bronze-to-Silver transformation "
+            "completed successfully."
+        )
+
         return valid_stock_df
 
     except Exception as e:
-        logger.exception("[TRANSFORM][DAILY_FAIL] Error transforming daily data: %s", e)
+
+        print("\n" + "!" * 80)
+        print("DAILY TIME SERIES TRANSFORMATION FAILED")
+        print("!" * 80)
+
+        logger.exception(
+            "[ALPHAVANTAGE][DAILY] Error transforming daily "
+            "time-series data: %s", e
+        )
+
         raise

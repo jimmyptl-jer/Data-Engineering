@@ -50,46 +50,12 @@ class StockDataLoader:
         """
         Serialize a raw JSON payload and upload it directly
         to the AWS S3 Bronze layer.
-
-        Args:
-            data:
-                Raw API payload.
-
-            bucket_name:
-                Name of the target S3 bucket.
-
-            bucket_key:
-                Complete S3 object key.
-
-            stock_symbol:
-                Optional stock ticker symbol. This is only required
-                for symbol-specific datasets.
-
-        Returns:
-            dict:
-                AWS boto3 S3 response payload containing HTTP status
-                and ETag metadata.
-
-        Raises:
-            Exception:
-                If JSON serialization fails or the S3 put_object
-                operation fails.
         """
-
-        logger.info(
-            "[LOAD][S3_KEY] Target S3 path — Bucket: %s, Key: %s",
-            bucket_name,
-            bucket_key,
-        )
 
         try:
             # ----------------------------------------------------
-            # 2. Initialize boto3 S3 client
+            # Initialize S3 client
             # ----------------------------------------------------
-
-            logger.info(
-                "[LOAD][S3_CLIENT] Instantiating boto3 S3 client."
-            )
 
             s3 = boto3.client(
                 "s3",
@@ -97,17 +63,9 @@ class StockDataLoader:
                 aws_secret_access_key=self.aws_secret_access_key,
             )
 
-            logger.info(
-                "[LOAD][S3_CLIENT_OK] boto3 S3 client initialized."
-            )
-
             # ----------------------------------------------------
-            # 3. Serialize payload
+            # Serialize payload
             # ----------------------------------------------------
-
-            logger.info(
-                "[LOAD][SERIALIZE] Serializing raw payload to JSON."
-            )
 
             json_data = json.dumps(
                 data,
@@ -119,21 +77,16 @@ class StockDataLoader:
             )
 
             logger.info(
-                "[LOAD][SERIALIZE_OK] JSON serialization complete. "
-                "Size: %d bytes.",
+                "[LOAD][S3_UPLOAD] Uploading raw payload | "
+                "bucket=%s | key=%s | size_bytes=%d",
+                bucket_name,
+                bucket_key,
                 payload_bytes,
             )
 
             # ----------------------------------------------------
-            # 4. Upload to S3
+            # Upload to S3
             # ----------------------------------------------------
-
-            logger.info(
-                "[LOAD][S3_PUT] Uploading object to S3 — "
-                "Bucket: %s, Key: %s",
-                bucket_name,
-                bucket_key,
-            )
 
             response = s3.put_object(
                 Bucket=bucket_name,
@@ -143,31 +96,26 @@ class StockDataLoader:
             )
 
             # ----------------------------------------------------
-            # 5. Successful upload
+            # Successful upload
             # ----------------------------------------------------
 
             logger.info(
-                "[LOAD][S3_PUT_OK] Upload successful — "
-                "Bucket: %s, Key: %s",
+                "[LOAD][S3_UPLOAD_SUCCESS] Raw payload uploaded successfully | "
+                "bucket=%s | key=%s | size_bytes=%d",
                 bucket_name,
                 bucket_key,
-            )
-
-            logger.debug(
-                "[LOAD][S3_RESPONSE] Response metadata: %s",
-                response.get("ResponseMetadata"),
+                payload_bytes,
             )
 
             return response
 
-        except Exception as e:
+        except Exception:
+
             logger.exception(
-                "[LOAD_FAIL][S3_UPLOAD_ERROR] "
-                "Failed to upload payload to S3 — "
-                "Bucket: %s, Key: %s, Error: %s",
+                "[LOAD][S3_UPLOAD_FAILED] Failed to upload raw payload | "
+                "bucket=%s | key=%s",
                 bucket_name,
                 bucket_key,
-                e,
             )
 
             raise

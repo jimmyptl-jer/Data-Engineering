@@ -77,14 +77,12 @@ SILVER_BASE_PATH = (
     "s3a://graywolf--data--lake/"
     "stock/"
     "silver/"
-    "source=alphavantage/"
 )
 
 GOLD_BASE_PATH = (
     "s3a://graywolf--data--lake/"
     "stock/"
     "gold/"
-    "source=alphavantage/"
 )
 
 # ============================================================

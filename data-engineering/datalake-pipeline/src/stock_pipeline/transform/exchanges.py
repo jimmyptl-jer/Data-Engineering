@@ -4,14 +4,49 @@ Massive Exchanges — Bronze-to-Silver Transformation Module.
 Transforms Massive (Polygon.io) exchange reference data (JSON)
 into a cleaned, validated Silver-ready PySpark DataFrame.
 
+Massive Exchanges — Bronze-to-Silver Transformation Module.
+
+Transforms Massive (Polygon.io) exchange reference data from Bronze JSON
+into a cleaned, validated Silver-ready PySpark DataFrame.
+
+Transformation Flow:
+    1. Select required columns from Bronze payload
+    2. Enforce explicit PySpark data types
+    3. Trim whitespace
+    4. Normalize fake-null tokens
+    5. Apply validation rules
+    6. Generate validation_reason
+    7. Standardize casing
+    8. Row count metrics
+    9. Return Silver DataFrame
+
+Dataset:
+  - `exchanges`
+
 Fields Processed:
-  - `asset_class`     (e.g., 'stocks', 'crypto')
-  - `id`              (Unique exchange integer identifier)
-  - `locale`          (e.g., 'us', 'global')
-  - `name`            (e.g., 'New York Stock Exchange')
-  - `operating_mic`   (Market Identifier Code, e.g., 'XNYS')
-  - `participant_id`  (Participant identifier)
-  - `type`            (Exchange type, e.g., 'EXCHANGE', 'TRF')
+
+  Dataset Columns
+  ['asset_class', 'id', 'locale', 'name', 'operating_mic', 'participant_id', 'type']
+
+  root
+    |-- asset_class: string (nullable = true)
+    |-- id: long (nullable = true)
+    |-- locale: string (nullable = true)
+    |-- name: string (nullable = true)
+    |-- operating_mic: string (nullable = true)
+    |-- participant_id: string (nullable = true)
+    |-- type: string (nullable = true)
+
+    +-----------+---+------+-----------------------------+-------------+--------------+--------+
+    |asset_class| id|locale|                         name|operating_mic|participant_id|    type|
+    +-----------+---+------+-----------------------------+-------------+--------------+--------+
+    |     stocks|  1|    us|       New York Stock Exchange|         XNYS|          NYSE|EXCHANGE|
+    |     stocks|  2|    us|NYSE American, LLC (AMEX)    |         XASE|          AMEX|EXCHANGE|
+    |     stocks| 10|    us|       IEX Market Inc.        |         IEXG|          IEXG|EXCHANGE|
+    |     stocks| 11|    us|          Chicago Board Options|         XCBO|          CBOE|EXCHANGE|
+    |     crypto|  6|global|         Coinbase              |         COINBASE|      COINBASE|EXCHANGE|
+    +-----------+---+------+-----------------------------+-------------+--------------+--------+
+
 """
 
 from __future__ import annotations
@@ -42,20 +77,31 @@ def transform_massive_exchanges_dataset(
     """
     Transform Massive exchange reference data into a cleaned,
     validated Silver-ready DataFrame.
-
-    Args:
-        spark (SparkSession): Active SparkSession instance.
-        data_df (DataFrame): Raw Bronze DataFrame containing exchange records.
-
-    Returns:
-        DataFrame: Transformed and validated exchange DataFrame.
     """
-    logger.info("[EXCHANGES] Processing massive exchanges dataset.")
+
+    # ============================================================
+    # STEP 1: START MASSIVE EXCHANGES TRANSFORMATION
+    # ============================================================
+
+    print("\n" + "=" * 80)
+    print("STEP 1: MASSIVE EXCHANGES — BRONZE → SILVER")
+    print("=" * 80)
+
+    logger.info(
+        "[MASSIVE][EXCHANGES] Starting Bronze-to-Silver "
+        "transformation."
+    )
 
     try:
-        # ==============================================================================
-        # 1. Select required columns from raw Bronze payload
-        # ==============================================================================
+
+        # ========================================================
+        # STEP 2: SELECT + CAST
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 2: SELECT + CAST EXCHANGE DATA")
+        print("=" * 80)
+
         exchange_df = data_df.select(
             "asset_class",
             "id",
@@ -66,9 +112,6 @@ def transform_massive_exchanges_dataset(
             "type",
         )
 
-        # ==============================================================================
-        # 2. Enforce explicit PySpark data types
-        # ==============================================================================
         exchange_df = exchange_df.select(
             col("asset_class").cast(StringType()).alias("asset_class"),
             col("id").cast(LongType()).alias("id"),
@@ -79,6 +122,19 @@ def transform_massive_exchanges_dataset(
             col("type").cast(StringType()).alias("type"),
         )
 
+        logger.info(
+            "[MASSIVE][EXCHANGES] Required columns selected "
+            "and cast to target types."
+        )
+
+        # ========================================================
+        # STEP 3: TRIM WHITESPACE
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 3: TRIM WHITESPACE")
+        print("=" * 80)
+
         required_string_cols = [
             "asset_class",
             "locale",
@@ -88,18 +144,24 @@ def transform_massive_exchanges_dataset(
             "type",
         ]
 
-        # ==============================================================================
-        # 3. Trim string columns
-        # ==============================================================================
         for column_name in required_string_cols:
             exchange_df = exchange_df.withColumn(
                 column_name,
                 trim(col(column_name)),
             )
 
-        # ==============================================================================
-        # 4. Convert fake NULL strings to actual PySpark NULL
-        # ==============================================================================
+        logger.info(
+            "[MASSIVE][EXCHANGES] Whitespace trimming completed."
+        )
+
+        # ========================================================
+        # STEP 4: NORMALIZE FAKE NULL VALUES
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 4: NORMALIZE FAKE NULL VALUES")
+        print("=" * 80)
+
         fake_null_values = [
             "",
             "n/a",
@@ -118,9 +180,18 @@ def transform_massive_exchanges_dataset(
                 ).otherwise(col(column_name)),
             )
 
-        # ==============================================================================
-        # 5. Validation status tagging (Quarantine audit pattern)
-        # ==============================================================================
+        logger.info(
+            "[MASSIVE][EXCHANGES] Fake-null normalization completed."
+        )
+
+        # ========================================================
+        # STEP 5: VALIDATION STATUS
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 5: APPLY EXCHANGE VALIDATION")
+        print("=" * 80)
+
         exchange_df = exchange_df.withColumn(
             "validation_status",
             when(col("asset_class").isNull(), "INVALID")
@@ -133,9 +204,18 @@ def transform_massive_exchanges_dataset(
             .otherwise("VALID"),
         )
 
-        # ==============================================================================
-        # 6. Detailed validation error reason
-        # ==============================================================================
+        logger.info(
+            "[MASSIVE][EXCHANGES] Validation status generated."
+        )
+
+        # ========================================================
+        # STEP 6: VALIDATION REASON
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 6: GENERATE VALIDATION REASONS")
+        print("=" * 80)
+
         exchange_df = exchange_df.withColumn(
             "validation_reason",
             concat_ws(
@@ -150,7 +230,18 @@ def transform_massive_exchanges_dataset(
             ),
         )
 
-        # Standardize codes to uppercase/lowercase conventions
+        logger.info(
+            "[MASSIVE][EXCHANGES] Validation reasons generated."
+        )
+
+        # ========================================================
+        # STEP 7: STANDARDIZE CASING
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 7: STANDARDIZE EXCHANGE CASING")
+        print("=" * 80)
+
         exchange_df = exchange_df.withColumn(
             "mic",
             upper(col("operating_mic"))
@@ -166,9 +257,67 @@ def transform_massive_exchanges_dataset(
             lower(col("locale"))
         )
 
-        logger.info("[EXCHANGES] Transformation completed successfully.")
+        logger.info(
+            "[MASSIVE][EXCHANGES] Casing standardization completed."
+        )
+
+        # ========================================================
+        # STEP 8: ROW COUNT METRICS
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 8: MASSIVE EXCHANGES ROW COUNT METRICS")
+        print("=" * 80)
+
+        total_in = data_df.count()
+        total_out = exchange_df.count()
+
+        valid_count = exchange_df.filter(
+            col("validation_status") == "VALID"
+        ).count()
+
+        invalid_count = exchange_df.filter(
+            col("validation_status") == "INVALID"
+        ).count()
+
+        logger.info(
+            "[MASSIVE][EXCHANGES][METRICS] "
+            "total_in=%d | total_out=%d | valid=%d | invalid=%d",
+            total_in,
+            total_out,
+            valid_count,
+            invalid_count,
+        )
+
+        print(f"Total In      : {total_in}")
+        print(f"Total Out     : {total_out}")
+        print(f"Valid Records : {valid_count}")
+        print(f"Invalid       : {invalid_count}")
+
+        # ========================================================
+        # STEP 9: RETURN SILVER DATAFRAME
+        # ========================================================
+
+        print("\n" + "=" * 80)
+        print("STEP 9: MASSIVE EXCHANGES TRANSFORMATION COMPLETED")
+        print("=" * 80)
+
+        logger.info(
+            "[MASSIVE][EXCHANGES] Bronze-to-Silver transformation "
+            "completed successfully."
+        )
+
         return exchange_df
 
     except Exception:
-        logger.exception("[EXCHANGES] Error processing exchanges dataset.")
+
+        print("\n" + "!" * 80)
+        print("MASSIVE EXCHANGES TRANSFORMATION FAILED")
+        print("!" * 80)
+
+        logger.exception(
+            "[MASSIVE][EXCHANGES] Error processing exchanges "
+            "dataset."
+        )
+
         raise

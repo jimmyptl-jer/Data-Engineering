@@ -6,12 +6,16 @@ the Extractor, Transformer, Loader, and Watermark components,
 implementing a Medallion Architecture (Bronze -> Silver -> Gold).
 
 Key Pipeline Phases:
-  1. Ingestion: Fetches raw JSON payloads from APIs and lands them in S3 Bronze.
-  2. Bronze-to-Silver (Daily): Extracts raw JSON, applies date-based watermark filtering,
-     cleans, validates, enriches metrics, and writes Silver CSV & Parquet outputs.
-  3. Bronze-to-Silver (Overview): Extracts raw JSON, transforms reference company data into Silver.
-  4. Gold Build: Reads Silver Daily & Overview datasets, performs a LEFT JOIN on stock symbol,
-     and writes unified business dataset to S3 Gold layer.
+    1. Ingestion:
+       Fetches raw JSON payloads from APIs and lands them in S3 Bronze.
+
+    2. Bronze-to-Silver:
+       Extracts raw data, applies transformations, validations,
+       watermark processing, and writes Silver outputs.
+
+    3. Gold Build:
+       Reads Silver datasets, joins business datasets,
+       and writes the unified dataset to S3 Gold.
 """
 
 import logging
@@ -35,28 +39,33 @@ from .watermark.manager import WatermarkManager
 from .transform.daily import silver_transform_daily_timeseries
 from .transform.overview import silver_transform_overview
 from .transform.exchanges import transform_massive_exchanges_dataset
+from .transform.stock_tickers import transform_finnhub_stock_tickers_dataset
+
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# SPARK SESSION FACTORY
+# SPARK SESSION
 # ============================================================
 
 def create_spark_session() -> SparkSession:
     """
-    Create, configure, and return an active SparkSession instance.
+    Create and configure the SparkSession used by the pipeline.
 
-    Configures PySpark with the Hadoop AWS package (`org.apache.hadoop:hadoop-aws:3.4.1`)
-    to allow direct read/write access to AWS S3 using `s3a://` URIs.
+    Configures Hadoop AWS support so Spark can read and write
+    data directly from S3 using s3a:// URIs.
 
     Returns:
-        SparkSession: Ready-to-use active SparkSession.
+        SparkSession: Ready-to-use SparkSession.
 
     Raises:
         Exception: If SparkSession initialization fails.
     """
-    logger.info("[INIT] Initializing Spark session for StockDataPipeline.")
+
+    logger.info(
+        "[INIT][SPARK] Initializing Spark session."
+    )
 
     try:
         spark = (
@@ -69,209 +78,240 @@ def create_spark_session() -> SparkSession:
             .getOrCreate()
         )
 
-        logger.info("[INIT] Spark session ready. Version: %s", spark.version)
+        logger.info(
+            "[INIT][SPARK] Spark session initialized | version=%s",
+            spark.version,
+        )
+
         return spark
 
-    except Exception as e:
-        logger.exception("[INIT] Failed to initialize Spark session: %s", e)
+    except Exception:
+        logger.exception(
+            "[INIT][SPARK] Failed to initialize Spark session."
+        )
         raise
 
 
 # ============================================================
-# DATA LAYER WRITE HELPERS
+# SILVER / GOLD — PARQUET WRITER
 # ============================================================
 
-def _write_parquet(df, base_path: str, dataset_name: str, execution_start_time: datetime) -> None:
+def _write_parquet(
+    df,
+    datasource: str,
+    base_path: str,
+    dataset_name: str,
+    execution_start_time: datetime,
+) -> None:
     """
-    Write a processed DataFrame in compressed Parquet format to S3.
+    Write a processed DataFrame to S3 in Parquet format.
 
-    Parquet is the primary columnar storage format used for analytical queries.
-    It offers efficient compression and fast column-level reads in tools like
-    AWS Athena, Spark, and Redshift Spectrum.
-
-    Output S3 Path Example:
-      s3a://graywolf--data--lake/stock/silver/dataset=daily_time_series/
-        year=2026/month=08/day=14/hour=05/minute=30/format=parquet/
-
-    Args:
-        df: PySpark DataFrame to write.
-        base_path: Base S3 path prefix (e.g., 's3a://bucket/stock/silver/').
-        dataset_name: Target dataset name (e.g., 'daily_time_series').
-        execution_start_time: Pipeline start timestamp — used to build partition keys.
+    Output is partitioned using the pipeline execution timestamp.
     """
+
     logger.info(
-        "[WRITE_PARQUET] Writing dataset=%s to base_path=%s",
+        "[WRITE][PARQUET] Writing dataset | "
+        "datasource=%s | dataset=%s",
+        datasource,
         dataset_name,
-        base_path,
     )
 
-    # Write Parquet with Hive-style partitioning keys derived from execution timestamp.
-    # mode="overwrite" replaces the partition if re-run on the same timestamp.
-    (
-        df.write
-        .mode("overwrite")
-        .parquet(
-            f"{base_path}"
-            f"dataset={dataset_name}/"
-            f"year={execution_start_time.year}/"
-            f"month={execution_start_time.month:02d}/"
-            f"day={execution_start_time.day:02d}/"
-            f"hour={execution_start_time.hour:02d}/"
-            f"minute={execution_start_time.minute:02d}/"
-            f"format=parquet/"
+    try:
+        (
+            df.write
+            .mode("overwrite")
+            .parquet(
+                f"{base_path}"
+                f"datasource={datasource}/"
+                f"dataset={dataset_name}/"
+                f"year={execution_start_time.year}/"
+                f"month={execution_start_time.month:02d}/"
+                f"day={execution_start_time.day:02d}/"
+                f"hour={execution_start_time.hour:02d}/"
+                f"minute={execution_start_time.minute:02d}/"
+                f"format=parquet/"
+            )
         )
-    )
 
-    logger.info("[WRITE_PARQUET_OK] Parquet write completed for dataset=%s.", dataset_name)
-
-
-def _write_csv(df, base_path: str, dataset_name: str, execution_start_time: datetime) -> None:
-    """
-    Write a processed DataFrame in human-readable CSV format to S3.
-
-    CSV is written alongside Parquet as a secondary format for:
-      - Quick manual inspection via S3 console download
-      - Compatibility with non-Spark tools (Excel, pandas, etc.)
-
-    Output S3 Path Example:
-      s3a://graywolf--data--lake/stock/silver/dataset=daily_time_series/
-        year=2026/month=08/day=14/hour=05/minute=30/format=csv/
-
-    Args:
-        df: PySpark DataFrame to write.
-        base_path: Base S3 path prefix (e.g., 's3a://bucket/stock/silver/').
-        dataset_name: Target dataset name (e.g., 'daily_time_series').
-        execution_start_time: Pipeline start timestamp — used to build partition keys.
-    """
-    logger.info(
-        "[WRITE_CSV] Writing dataset=%s to base_path=%s",
-        dataset_name,
-        base_path,
-    )
-
-    # Write CSV with headers enabled and Hive-style partitioning.
-    # mode="overwrite" replaces the partition if re-run on the same timestamp.
-    (
-        df.write
-        .mode("overwrite")
-        .options(header=True)
-        .csv(
-            f"{base_path}"
-            f"dataset={dataset_name}/"
-            f"year={execution_start_time.year}/"
-            f"month={execution_start_time.month:02d}/"
-            f"day={execution_start_time.day:02d}/"
-            f"hour={execution_start_time.hour:02d}/"
-            f"minute={execution_start_time.minute:02d}/"
-            f"format=csv/"
+        logger.info(
+            "[WRITE][PARQUET] Write completed | "
+            "datasource=%s | dataset=%s",
+            datasource,
+            dataset_name,
         )
-    )
 
-    logger.info("[WRITE_CSV_OK] CSV write completed for dataset=%s.", dataset_name)
+    except Exception:
+        logger.exception(
+            "[WRITE][PARQUET] Write failed | "
+            "datasource=%s | dataset=%s",
+            datasource,
+            dataset_name,
+        )
+        raise
 
 
 # ============================================================
-# STOCK PIPELINE CLASS
+# SILVER / GOLD — CSV WRITER
+# ============================================================
+
+def _write_csv(
+    df,
+    datasource: str,
+    base_path: str,
+    dataset_name: str,
+    execution_start_time: datetime,
+) -> None:
+    """
+    Write a processed DataFrame to S3 in CSV format.
+
+    CSV is written alongside Parquet for manual inspection
+    and compatibility with non-Spark tools.
+    """
+
+    logger.info(
+        "[WRITE][CSV] Writing dataset | "
+        "datasource=%s | dataset=%s",
+        datasource,
+        dataset_name,
+    )
+
+    try:
+        (
+            df.write
+            .mode("overwrite")
+            .options(header=True)
+            .csv(
+                f"{base_path}"
+                f"datasource={datasource}/"
+                f"dataset={dataset_name}/"
+                f"year={execution_start_time.year}/"
+                f"month={execution_start_time.month:02d}/"
+                f"day={execution_start_time.day:02d}/"
+                f"hour={execution_start_time.hour:02d}/"
+                f"minute={execution_start_time.minute:02d}/"
+                f"format=csv/"
+            )
+        )
+
+        logger.info(
+            "[WRITE][CSV] Write completed | "
+            "datasource=%s | dataset=%s",
+            datasource,
+            dataset_name,
+        )
+
+    except Exception:
+        logger.exception(
+            "[WRITE][CSV] Write failed | "
+            "datasource=%s | dataset=%s",
+            datasource,
+            dataset_name,
+        )
+        raise
+
+
+# ============================================================
+# STOCK PIPELINE — ORCHESTRATOR
 # ============================================================
 
 class StockPipeline:
     """
-    Main ETL Orchestrator Class for the Stock Data Pipeline.
+    Main ETL orchestrator for the Stock Data Pipeline.
 
     Responsibilities:
-      - Initializing pipeline dependencies (Spark, Extractors, Transformers, Loaders, Watermarks).
-      - Ingesting raw API responses from Alpha Vantage to Bronze S3.
-      - Executing Bronze-to-Silver ETL cycles with date-based watermark incrementality.
-      - Executing Bronze-to-Silver company overview reference dataset ETL cycles.
-      - Building the Gold unified dataset by joining Silver datasets.
+        - Initialize pipeline dependencies.
+        - Ingest external API data into Bronze.
+        - Process Bronze data into Silver.
+        - Manage incremental watermarks.
+        - Build the Gold unified dataset.
     """
+
+    # ========================================================
+    # PIPELINE INITIALIZATION
+    # ========================================================
 
     def __init__(self):
         """
-        Initialize the StockPipeline orchestrator.
+        Initialize the StockPipeline and all required dependencies.
 
-        This sets up all subsystems needed for the end-to-end ETL pipeline:
-            1. AWS credentials & S3 bucket configuration (from config.py / .env)
-            2. SparkSession for distributed data processing
-            3. Extractors for reading data from Bronze/Silver S3 layers
-            4. Loader for writing raw JSON data to S3 via boto3
-            5. WatermarkManager for tracking incremental processing state
-            6. Ingestion clients for each external data source API
+        Initializes:
+            - AWS configuration
+            - SparkSession
+            - Bronze/Silver extractors
+            - S3 loader
+            - Watermark manager
+            - API key manager
+            - External API ingestion clients
         """
-        logger.info("[PIPELINE] Initializing StockPipeline orchestrator.")
+
+        logger.info(
+            "[PIPELINE][INIT] Initializing StockPipeline."
+        )
 
         try:
-            # ── Step 1: Load AWS & Pipeline Config from environment ──
-            # These values come from config.py which reads from .env file
             self.aws_access_key_id = config.AWS_ACCESS_KEY_ID
             self.aws_secret_access_key = config.AWS_SECRET_ACCESS_KEY
             self.s3_bucket_name = config.S3_BUCKET_NAME
 
-            # Alpha Vantage endpoint definitions (function name → dataset mapping)
-            self.alpha_vantage_config = config.ALPHA_VANTAGE_ENDPOINTS
+            self.alpha_vantage_config = (
+                config.ALPHA_VANTAGE_ENDPOINTS
+            )
 
-            # Base S3 paths for Silver and Gold layers
-            # e.g., "s3a://graywolf--data--lake/stock/silver/"
             self.silver_base_path = config.SILVER_BASE_PATH
             self.gold_base_path = config.GOLD_BASE_PATH
 
-            # ── Step 2: Initialize Spark Session ──
-            # Configured with Hadoop AWS package for S3 read/write via s3a://
             self.spark = create_spark_session()
 
-            # ── Step 3: Initialize Extractors (Bronze/Silver data readers) ──
-            # StockDataExtractor:  reads Alpha Vantage Bronze & Silver data
-            # MassiveApiExtractor: reads Massive (Polygon.io) Bronze data
-            self.extractor = StockDataExtractor(self.spark)
-            self.massive_data_extractor = MassiveApiExtractor(self.spark)
+            self.extractor = StockDataExtractor(
+                self.spark
+            )
 
-            # ── Step 4: Initialize Watermark Manager ──
-            # Tracks last-processed dates per dataset for incremental loading
-            # Stores watermark state as JSON files in S3
-            self.watermark_manager = WatermarkManager(self.spark)
+            self.massive_data_extractor = MassiveApiExtractor(
+                self.spark
+            )
 
-            # ── Step 5: Initialize S3 Loader (boto3-based writer) ──
-            # Used by ingestion classes to upload raw JSON to Bronze layer
+            self.watermark_manager = WatermarkManager(
+                self.spark
+            )
+
             self.loader = StockDataLoader(
                 self.aws_access_key_id,
                 self.aws_secret_access_key,
             )
 
-            # ── Step 6: Initialize API Key Manager ──
-            # Handles rotation of multiple API keys to avoid rate limits
             self.api_key = APIKeyManager()
 
-            # ── Step 7: Initialize Ingestion Clients ──
-            # Each ingestion class handles: API call → validate → serialize → upload to S3 Bronze
-
-            # Alpha Vantage: Daily time series, company overview
             self.ingestion = AlphaVantageIngestion(
                 extractor=self.extractor,
                 loader=self.loader,
                 bucket_name=self.s3_bucket_name,
             )
 
-            # Massive (Polygon.io): Exchanges, aggregates, splits, dividends
             self.massive_ingestion = MassiveIngestion(
                 loader=self.loader,
-                bucket_name=self.s3_bucket_name
+                bucket_name=self.s3_bucket_name,
             )
 
-            # Finnhub: Stock symbols list per exchange
             self.finnhub_ingestion = FinnHubIngestion(
                 loader=self.loader,
-                bucket_name=self.s3_bucket_name
+                bucket_name=self.s3_bucket_name,
             )
 
-            logger.info("[PIPELINE] StockPipeline initialized successfully. S3 Bucket: %s", self.s3_bucket_name)
+            logger.info(
+                "[PIPELINE][INIT] StockPipeline initialized successfully | "
+                "bucket=%s",
+                self.s3_bucket_name,
+            )
 
-        except Exception as e:
-            logger.exception("[PIPELINE] Failed to initialize StockPipeline: %s", e)
+        except Exception:
+            logger.exception(
+                "[PIPELINE][INIT] Failed to initialize StockPipeline."
+            )
             raise
 
-    # ============================================================
-    # INGESTION LAYER
-    # ============================================================
+    # ========================================================
+    # INGESTION — ALPHA VANTAGE → BRONZE
+    # ========================================================
 
     def _ingest_from_alphavantage_api(
         self,
@@ -280,23 +320,26 @@ class StockPipeline:
         execution_start_time: datetime,
     ) -> list[dict]:
         """
-        Fetch raw market data from Alpha Vantage API for all symbols and endpoints,
-        writing raw JSON files to S3 Bronze layer.
+        Fetch Alpha Vantage data and write raw responses to Bronze.
 
-        Args:
-            batch_id: Unique batch execution identifier.
-            stock_symbols: List of stock ticker symbols (e.g., ['IBM', 'AAPL']).
-            execution_start_time: Pipeline execution timestamp.
+        Processes every configured endpoint for every stock symbol.
 
         Returns:
-            List of dictionary results summarizing ingestion outcomes per symbol & function.
+            List of ingestion results.
         """
-        logger.info("[INGEST] Starting API ingestion cycle for %d symbol(s).", len(stock_symbols))
+
+        logger.info(
+            "[INGEST][ALPHAVANTAGE] Starting ingestion | "
+            "batch_id=%s | symbols=%d",
+            batch_id,
+            len(stock_symbols),
+        )
 
         results = []
 
         for symbol in stock_symbols:
             for endpoint in self.alpha_vantage_config:
+
                 function = endpoint["function"]
                 dataset = endpoint["dataset"]
 
@@ -307,28 +350,46 @@ class StockPipeline:
                         dataset=dataset,
                         datasource="alphavantage",
                         execution_start_time=execution_start_time,
-                        run_id=batch_id
+                        run_id=batch_id,
                     )
 
-                    results.append({
-                        "symbol": symbol,
-                        "function": function,
-                        "response": response,
-                    })
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "function": function,
+                            "response": response,
+                        }
+                    )
 
                 except Exception as e:
                     logger.exception(
-                        "[INGEST] Error ingesting symbol=%s via function=%s: %s",
-                        symbol, function, e,
+                        "[INGEST][ALPHAVANTAGE] Ingestion failed | "
+                        "symbol=%s | function=%s | batch_id=%s",
+                        symbol,
+                        function,
+                        batch_id,
                     )
-                    results.append({
-                        "symbol": symbol,
-                        "function": function,
-                        "error": str(e),
-                    })
 
-        logger.info("[INGEST] Ingestion cycle completed. Total requests processed: %d.", len(results))
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "function": function,
+                            "error": str(e),
+                        }
+                    )
+
+        logger.info(
+            "[INGEST][ALPHAVANTAGE] Ingestion completed | "
+            "batch_id=%s | requests=%d",
+            batch_id,
+            len(results),
+        )
+
         return results
+
+    # ========================================================
+    # INGESTION — FINNHUB → BRONZE
+    # ========================================================
 
     def _ingest_from_finnhub_api(
         self,
@@ -336,70 +397,61 @@ class StockPipeline:
         execution_start_time: datetime,
     ) -> list[dict]:
         """
-        Fetch data from Finnhub API and write raw data
-        to the S3 Bronze layer.
+        Fetch Finnhub data and write raw responses to Bronze.
         """
 
         logger.info(
-            "[INGEST][FINNHUB] Starting API ingestion cycle | "
-            "batch_id=%s | execution_start_time=%s",
+            "[INGEST][FINNHUB] Starting ingestion | "
+            "batch_id=%s",
             batch_id,
-            execution_start_time,
         )
 
         results = []
 
         try:
-            # Step 1: Fetch exchanges
-            logger.info(
-                "[INGEST][FINNHUB][EXCHANGES] "
-                "Starting exchange data ingestion | batch_id=%s",
-                batch_id,
-            )
-
             response = self.finnhub_ingestion.ingest_stocks_list(
                 exchange="US",
                 execution_start_time=execution_start_time,
                 run_id=batch_id,
             )
 
-            # Step 2: Process response
-            status = "SUCCESS" if response is not None else "FAILED"
-
-            logger.info(
-                "[INGEST][FINNHUB][EXCHANGES] "
-                "Exchange data ingestion completed | "
-                "status=%s | batch_id=%s",
-                status,
-                batch_id,
+            status = (
+                "SUCCESS"
+                if response is not None
+                else "FAILED"
             )
 
-            results.append({
-                "source": "finnhub",
-                "dataset": "exchanges",
-                "batch_id": batch_id,
-                "status": status,
-                "response": response,
-            })
+            results.append(
+                {
+                    "source": "finnhub",
+                    "dataset": "exchanges",
+                    "batch_id": batch_id,
+                    "status": status,
+                    "response": response,
+                }
+            )
 
-            # Step 3: Complete ingestion cycle
             logger.info(
-                "[INGEST][FINNHUB] "
-                "API ingestion cycle completed | "
-                "datasets_processed=%d | batch_id=%s",
-                len(results),
+                "[INGEST][FINNHUB] Ingestion completed | "
+                "batch_id=%s | status=%s | datasets=%d",
                 batch_id,
+                status,
+                len(results),
             )
 
             return results
 
         except Exception:
             logger.exception(
-                "[INGEST][FINNHUB] "
-                "API ingestion cycle failed | batch_id=%s",
+                "[INGEST][FINNHUB] Ingestion failed | "
+                "batch_id=%s",
                 batch_id,
             )
             raise
+
+    # ========================================================
+    # INGESTION — MASSIVE → BRONZE
+    # ========================================================
 
     def _ingest_from_massive_api(
         self,
@@ -408,48 +460,44 @@ class StockPipeline:
         symbol: str,
     ) -> list[dict]:
         """
-        Ingest all configured datasets from the Massive API.
+        Ingest configured datasets from the Massive API.
 
-        Args:
-            batch_id: Unique identifier for the current pipeline batch.
-            execution_start_time: Timestamp when the pipeline execution started.
-            symbol: Stock symbol used for symbol-specific endpoints.
-
-        Returns:
-            List containing the ingestion results.
+        Datasets:
+            - exchanges
+            - aggregates
+            - stock overview
+            - dividends
         """
+
+        logger.info(
+            "[INGEST][MASSIVE] Starting ingestion | "
+            "batch_id=%s | symbol=%s",
+            batch_id,
+            symbol,
+        )
 
         results = []
 
         try:
-            logger.info(
-                "[INGEST][MASSIVE] Starting Massive API ingestion | batch_id=%s | symbol=%s",
-                batch_id, symbol,
-            )
-
-            # =========================================================
-            # 1. EXCHANGES
-            # =========================================================
-
             response = self.massive_ingestion.ingest_exchanges(
                 datasource="massive",
                 execution_start_time=execution_start_time,
                 run_id=batch_id,
             )
 
-            logger.info("[INGEST][MASSIVE] Exchanges response: %s", response)
-
-            results.append({
-                "source": "massive",
-                "dataset": "exchanges",
-                "batch_id": batch_id,
-                "status": "SUCCESS" if response is not None else "FAILED",
-                "response": response,
-            })
-
-            # =========================================================
-            # 2. AGGREGATES
-            # =========================================================
+            results.append(
+                {
+                    "source": "massive",
+                    "dataset": "exchanges",
+                    "batch_id": batch_id,
+                    "status": (
+                        "SUCCESS"
+                        if response is not None
+                        else "FAILED"
+                    ),
+                    "response": response,
+                }
+            )
 
             response = self.massive_ingestion.ingest_aggregates(
                 datasource="massive",
@@ -462,19 +510,19 @@ class StockPipeline:
                 to_date="2026-08-10",
             )
 
-            logger.info("[INGEST][MASSIVE] Aggregates response: %s", response)
-
-            results.append({
-                "source": "massive",
-                "dataset": "aggregates",
-                "batch_id": batch_id,
-                "status": "SUCCESS" if response is not None else "FAILED",
-                "response": response,
-            })
-
-            # =========================================================
-            # 3. STOCK OVERVIEW
-            # =========================================================
+            results.append(
+                {
+                    "source": "massive",
+                    "dataset": "aggregates",
+                    "batch_id": batch_id,
+                    "status": (
+                        "SUCCESS"
+                        if response is not None
+                        else "FAILED"
+                    ),
+                    "response": response,
+                }
+            )
 
             response = self.massive_ingestion.ingest_stock_overview(
                 datasource="massive",
@@ -483,19 +531,19 @@ class StockPipeline:
                 symbol=symbol,
             )
 
-            logger.info("[INGEST][MASSIVE] Stock overview response: %s", response)
-
-            results.append({
-                "source": "massive",
-                "dataset": "stock_overview",
-                "batch_id": batch_id,
-                "status": "SUCCESS" if response is not None else "FAILED",
-                "response": response,
-            })
-
-            # =========================================================
-            # 4. DIVIDENDS
-            # =========================================================
+            results.append(
+                {
+                    "source": "massive",
+                    "dataset": "stock_overview",
+                    "batch_id": batch_id,
+                    "status": (
+                        "SUCCESS"
+                        if response is not None
+                        else "FAILED"
+                    ),
+                    "response": response,
+                }
+            )
 
             response = self.massive_ingestion.ingest_dividends(
                 datasource="massive",
@@ -504,57 +552,49 @@ class StockPipeline:
                 symbol=symbol,
             )
 
-            logger.info("[INGEST][MASSIVE] Dividends response: %s", response)
-
-            results.append({
-                "source": "massive",
-                "dataset": "dividends",
-                "batch_id": batch_id,
-                "status": "SUCCESS" if response is not None else "FAILED",
-                "response": response,
-            })
-
-            # =========================================================
-            # RESULTS SUMMARY
-            # =========================================================
-
-            for result in results:
-                logger.info(
-                    "[INGEST][MASSIVE] Dataset: %s | Source: %s | "
-                    "Batch: %s | Status: %s",
-                    result.get("dataset"),
-                    result.get("source"),
-                    result.get("batch_id"),
-                    result.get("status"),
-                )
+            results.append(
+                {
+                    "source": "massive",
+                    "dataset": "dividends",
+                    "batch_id": batch_id,
+                    "status": (
+                        "SUCCESS"
+                        if response is not None
+                        else "FAILED"
+                    ),
+                    "response": response,
+                }
+            )
 
             logger.info(
                 "[INGEST][MASSIVE] Ingestion completed | "
-                "batch_id=%s | total_datasets=%d",
+                "batch_id=%s | datasets=%d",
                 batch_id,
                 len(results),
             )
 
         except Exception as e:
             logger.exception(
-                "[INGEST][MASSIVE] Error during ingestion | "
+                "[INGEST][MASSIVE] Ingestion failed | "
                 "batch_id=%s | error=%s",
                 batch_id,
                 str(e),
             )
 
-            results.append({
-                "source": "massive",
-                "batch_id": batch_id,
-                "status": "FAILED",
-                "error": str(e),
-            })
+            results.append(
+                {
+                    "source": "massive",
+                    "batch_id": batch_id,
+                    "status": "FAILED",
+                    "error": str(e),
+                }
+            )
 
         return results
 
-    # ============================================================
-    # DAILY DATASET — Date-Based Watermark Incremental
-    # ============================================================
+    # ========================================================
+    # SILVER — DAILY TIME SERIES
+    # ========================================================
 
     def _process_daily_dataset(
         self,
@@ -563,47 +603,71 @@ class StockPipeline:
         batch_id: str,
     ) -> bool:
         """
-        Execute the Bronze -> Silver processing cycle for Daily Time Series data.
+        Process Daily Time Series data from Bronze to Silver.
 
-        Args:
-            datasource: Data source identifier.
-            execution_start_time: Pipeline execution timestamp.
-            batch_id: Unique batch execution identifier.
-
-        Returns:
-            bool: True if Silver output was written, False if skipped due to no new records.
+        Flow:
+            1. Extract Bronze data.
+            2. Read existing watermark.
+            3. Transform and apply watermark filtering.
+            4. Check for new records.
+            5. Calculate latest watermark.
+            6. Write CSV and Parquet.
+            7. Persist updated watermark.
         """
-        daily_dataset = config.get_dataset_name_by_function("TIME_SERIES_DAILY")
-        pipeline_name = "bronze_to_silver"
 
-        logger.info("[DAILY] Starting Bronze-to-Silver cycle for dataset=%s.", daily_dataset)
-
-        # 1. Extract raw JSON from Bronze layer into PySpark DataFrame
-        extracted_daily_data = self.extractor.extract_bronze_daily_data(
-            datasource,
-            daily_dataset,
-            execution_start_time=execution_start_time,
-            batch_id=batch_id
+        daily_dataset = config.get_dataset_name_by_function(
+            "TIME_SERIES_DAILY"
         )
 
-        # 2. Retrieve existing watermark value (if present)
+        pipeline_name = "bronze_to_silver"
+
+        logger.info(
+            "[SILVER][DAILY] Starting processing | "
+            "dataset=%s | batch_id=%s",
+            daily_dataset,
+            batch_id,
+        )
+
+        extracted_daily_data = (
+            self.extractor.extract_bronze_daily_data(
+                datasource,
+                daily_dataset,
+                execution_start_time=execution_start_time,
+                batch_id=batch_id,
+            )
+        )
+
         watermark_value = None
 
-        if self.watermark_manager.watermark_exists(pipeline_name, daily_dataset):
-            daily_watermark = self.watermark_manager.read_watermark(
-                pipeline_name=pipeline_name,
-                dataset_name=daily_dataset,
+        if self.watermark_manager.watermark_exists(
+            pipeline_name,
+            daily_dataset,
+        ):
+            daily_watermark = (
+                self.watermark_manager.read_watermark(
+                    pipeline_name=pipeline_name,
+                    dataset_name=daily_dataset,
+                )
             )
-            watermark_value = daily_watermark.get("watermark_value")
+
+            watermark_value = daily_watermark.get(
+                "watermark_value"
+            )
 
             logger.info(
-                "[DAILY] Existing watermark found: watermark_value=%s. Executing incremental load.",
+                "[SILVER][DAILY] Existing watermark found | "
+                "dataset=%s | watermark=%s",
+                daily_dataset,
                 watermark_value,
             )
-        else:
-            logger.info("[DAILY] No prior watermark found. Executing full historical load.")
 
-        # 3. Transform Bronze DataFrame to Silver schema
+        else:
+            logger.info(
+                "[SILVER][DAILY] No watermark found | "
+                "dataset=%s | mode=FULL_LOAD",
+                daily_dataset,
+            )
+
         daily_df = silver_transform_daily_timeseries(
             self.spark,
             daily_dataset,
@@ -611,26 +675,35 @@ class StockPipeline:
             watermark_value=watermark_value,
         )
 
-        # 4. Check if new records exist after watermark filtering
         if daily_df.isEmpty():
-            logger.info("[DAILY] No new records detected after watermark filtering. Skipping Silver write.")
+            logger.info(
+                "[SILVER][DAILY] No new records | "
+                "dataset=%s | batch_id=%s",
+                daily_dataset,
+                batch_id,
+            )
             return False
 
-        # 5. Extract latest trading day date to update the watermark
         daily_latest_watermark_value = (
             daily_df
-            .agg(spark_max("day_date").alias("watermark_value"))
+            .agg(
+                spark_max("day_date").alias(
+                    "watermark_value"
+                )
+            )
             .first()["watermark_value"]
         )
 
         logger.info(
-            "[DAILY] New maximum watermark value computed: %s",
+            "[SILVER][DAILY] Latest watermark calculated | "
+            "dataset=%s | watermark=%s",
+            daily_dataset,
             daily_latest_watermark_value,
         )
 
-        # 6. Write Silver outputs (CSV & Parquet)
         _write_csv(
             daily_df,
+            "alphavantage",
             self.silver_base_path,
             daily_dataset,
             execution_start_time,
@@ -638,12 +711,12 @@ class StockPipeline:
 
         _write_parquet(
             daily_df,
+            "alphavantage",
             self.silver_base_path,
             daily_dataset,
             execution_start_time,
         )
 
-        # 7. Persist updated watermark payload
         self.watermark_manager.write_watermark(
             watermark={
                 "pipeline_name": pipeline_name,
@@ -653,14 +726,28 @@ class StockPipeline:
                 "last_processed_at": execution_start_time.isoformat(),
                 "batch_id": batch_id,
                 "status": "SUCCESS",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
                 "updated_by": "stock_pipeline",
-                "remarks": "Bronze to Silver completed successfully.",
+                "remarks": (
+                    "Bronze to Silver completed successfully."
+                ),
             },
         )
 
-        logger.info("[DAILY] Bronze-to-Silver daily processing cycle completed successfully.")
+        logger.info(
+            "[SILVER][DAILY] Processing completed | "
+            "dataset=%s | batch_id=%s",
+            daily_dataset,
+            batch_id,
+        )
+
         return True
+
+    # ========================================================
+    # SILVER — MASSIVE EXCHANGES
+    # ========================================================
 
     def _process_massive_exchange_dataset(
         self,
@@ -670,21 +757,21 @@ class StockPipeline:
         batch_id: str,
     ) -> bool:
         """
-        Execute Bronze-to-Silver processing for Massive exchange reference data.
+        Process Massive exchange reference data from Bronze to Silver.
         """
+
         pipeline_name = "bronze_to_silver"
 
         logger.info(
-            "[%s][EXCHANGES] Starting Bronze-to-Silver processing. "
-            "datasource=%s, dataset=%s, batch_id=%s",
-            pipeline_name,
+            "[SILVER][EXCHANGES] Starting processing | "
+            "datasource=%s | dataset=%s | batch_id=%s",
             datasource,
             dataset,
             batch_id,
         )
 
         try:
-            massive_dataset = (
+            exchange_dataset = (
                 self.massive_data_extractor.extract_from_bronze_layer(
                     datasource=datasource,
                     dataset=dataset,
@@ -693,53 +780,67 @@ class StockPipeline:
                 )
             )
 
-            if massive_dataset is None:
+            if exchange_dataset is None:
                 logger.warning(
-                    "[%s][EXCHANGES] No data found in Bronze layer. "
-                    "dataset=%s, batch_id=%s",
-                    pipeline_name,
+                    "[SILVER][EXCHANGES] No Bronze data found | "
+                    "dataset=%s | batch_id=%s",
                     dataset,
                     batch_id,
                 )
                 return False
 
-            logger.info(
-                "[%s][EXCHANGES] Bronze data extracted successfully.",
-                pipeline_name,
-            )
-
             exchange_df = transform_massive_exchanges_dataset(
                 self.spark,
-                massive_dataset,
+                exchange_dataset,
             )
 
             if exchange_df is None:
                 logger.warning(
-                    "[%s][EXCHANGES] Transformation returned no data. "
-                    "dataset=%s, batch_id=%s",
-                    pipeline_name,
+                    "[SILVER][EXCHANGES] Transformation returned no data | "
+                    "dataset=%s | batch_id=%s",
                     dataset,
                     batch_id,
                 )
                 return False
 
+            _write_csv(
+                exchange_df,
+                datasource,
+                self.silver_base_path,
+                dataset,
+                execution_start_time,
+            )
+
+            _write_parquet(
+                exchange_df,
+                datasource,
+                self.silver_base_path,
+                dataset,
+                execution_start_time,
+            )
+
             logger.info(
-                "[%s][EXCHANGES] Bronze-to-Silver transformation completed successfully.",
-                pipeline_name,
+                "[SILVER][EXCHANGES] Processing completed | "
+                "dataset=%s | batch_id=%s",
+                dataset,
+                batch_id,
             )
 
             return True
 
         except Exception:
             logger.exception(
-                "[%s][EXCHANGES] Bronze-to-Silver processing failed. "
-                "datasource=%s, dataset=%s, batch_id=%s",
-                pipeline_name,
+                "[SILVER][EXCHANGES] Processing failed | "
+                "datasource=%s | dataset=%s | batch_id=%s",
                 datasource,
                 dataset,
                 batch_id,
             )
             return False
+
+    # ========================================================
+    # SILVER — MASSIVE DATASETS
+    # ========================================================
 
     def _process_massive_dataset(
         self,
@@ -749,41 +850,65 @@ class StockPipeline:
         batch_id: str,
     ) -> bool:
         """
-        Generic Bronze-to-Silver processing for Massive API datasets.
+        Process a generic Massive dataset from Bronze to Silver.
+
+        This function is currently responsible for extracting the
+        Bronze dataset and updating its watermark.
         """
+
         pipeline_name = "bronze_to_silver"
 
-        logger.info("%s Starting Bronze-to-Silver cycle for dataset=%s.", dataset, dataset)
-
-        massive_dataset = self.massive_data_extractor.extract_from_bronze_layer(
-            datasource=datasource,
-            dataset=dataset,
-            execution_start_time=execution_start_time,
-            batch_id=batch_id
+        logger.info(
+            "[SILVER][MASSIVE] Starting processing | "
+            "dataset=%s | batch_id=%s",
+            dataset,
+            batch_id,
         )
 
-        logger.info(massive_dataset)
+        massive_dataset = (
+            self.massive_data_extractor.extract_from_bronze_layer(
+                datasource=datasource,
+                dataset=dataset,
+                execution_start_time=execution_start_time,
+                batch_id=batch_id,
+            )
+        )
 
-        # Retrieve existing watermark value (if present)
         watermark_value = None
 
-        if self.watermark_manager.watermark_exists(pipeline_name, dataset):
-            exchange_watermark = self.watermark_manager.read_watermark(
-                pipeline_name=pipeline_name,
-                dataset_name=dataset,
+        if self.watermark_manager.watermark_exists(
+            pipeline_name,
+            dataset,
+        ):
+            dataset_watermark = (
+                self.watermark_manager.read_watermark(
+                    pipeline_name=pipeline_name,
+                    dataset_name=dataset,
+                )
             )
-            watermark_value = exchange_watermark.get("watermark_value")
+
+            watermark_value = dataset_watermark.get(
+                "watermark_value"
+            )
 
             logger.info(
-                "[EXCHANGES] Existing watermark found: watermark_value=%s. Executing incremental load.",
+                "[SILVER][MASSIVE] Existing watermark found | "
+                "dataset=%s | watermark=%s",
+                dataset,
                 watermark_value,
             )
+
         else:
-            logger.info("[EXCHANGES] No prior watermark found. Executing full historical load.")
+            logger.info(
+                "[SILVER][MASSIVE] No watermark found | "
+                "dataset=%s | mode=FULL_LOAD",
+                dataset,
+            )
 
-        watermark_col_value = execution_start_time.strftime("%Y-%m-%d")
+        watermark_col_value = (
+            execution_start_time.strftime("%Y-%m-%d")
+        )
 
-        # Persist updated watermark payload
         self.watermark_manager.write_watermark(
             watermark={
                 "pipeline_name": pipeline_name,
@@ -793,18 +918,154 @@ class StockPipeline:
                 "last_processed_at": execution_start_time.isoformat(),
                 "batch_id": batch_id,
                 "status": "SUCCESS",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
                 "updated_by": "stock_pipeline",
-                "remarks": "Bronze to Silver completed successfully.",
+                "remarks": (
+                    "Bronze to Silver completed successfully."
+                ),
             },
         )
 
-        logger.info("[EXCHANGES] Bronze-to-Silver exchanges processing cycle completed successfully.")
+        logger.info(
+            "[SILVER][MASSIVE] Processing completed | "
+            "dataset=%s | batch_id=%s",
+            dataset,
+            batch_id,
+        )
+
         return True
 
-    # ============================================================
-    # OVERVIEW DATASET — Hash-Based Change Detection Incremental
-    # ============================================================
+    # ========================================================
+    # SILVER — FINNHUB TICKER REFERENCE
+    # ========================================================
+
+    def _process_finnhub_dataset(
+        self,
+        datasource: str,
+        dataset: str,
+        execution_start_time: datetime,
+        batch_id: str,
+    ) -> bool:
+        """
+        Process Finnhub ticker reference data from Bronze to Silver.
+
+        Flow:
+            1. Extract Bronze data.
+            2. Check existing watermark.
+            3. Transform ticker reference data.
+            4. Write Silver CSV and Parquet.
+            5. Persist updated watermark.
+        """
+
+        pipeline_name = "bronze_to_silver"
+
+        logger.info(
+            "[SILVER][FINNHUB] Starting processing | "
+            "dataset=%s | batch_id=%s",
+            dataset,
+            batch_id,
+        )
+
+        extract_finnhub_dataset = (
+            self.massive_data_extractor.extract_from_bronze_layer(
+                datasource=datasource,
+                dataset=dataset,
+                execution_start_time=execution_start_time,
+                batch_id=batch_id,
+            )
+        )
+
+        watermark_value = None
+
+        if self.watermark_manager.watermark_exists(
+            pipeline_name,
+            dataset,
+        ):
+            finnhub_watermark = (
+                self.watermark_manager.read_watermark(
+                    pipeline_name=pipeline_name,
+                    dataset_name=dataset,
+                )
+            )
+
+            watermark_value = finnhub_watermark.get(
+                "watermark_value"
+            )
+
+            logger.info(
+                "[SILVER][FINNHUB] Existing watermark found | "
+                "dataset=%s | watermark=%s",
+                dataset,
+                watermark_value,
+            )
+
+        else:
+            logger.info(
+                "[SILVER][FINNHUB] No watermark found | "
+                "dataset=%s | mode=FULL_LOAD",
+                dataset,
+            )
+
+        stock_ticker_df = (
+            transform_finnhub_stock_tickers_dataset(
+                self.spark,
+                extract_finnhub_dataset,
+            )
+        )
+
+        watermark_col_value = (
+            execution_start_time.strftime("%Y-%m-%d")
+        )
+
+        _write_csv(
+            stock_ticker_df,
+            datasource,
+            self.silver_base_path,
+            dataset,
+            execution_start_time,
+        )
+
+        _write_parquet(
+            stock_ticker_df,
+            datasource,
+            self.silver_base_path,
+            dataset,
+            execution_start_time,
+        )
+
+        self.watermark_manager.write_watermark(
+            watermark={
+                "pipeline_name": pipeline_name,
+                "dataset_name": dataset,
+                "watermark_column": "exchange",
+                "watermark_value": watermark_col_value,
+                "last_processed_at": execution_start_time.isoformat(),
+                "batch_id": batch_id,
+                "status": "SUCCESS",
+                "updated_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "updated_by": "stock_pipeline",
+                "remarks": (
+                    "Finnhub Bronze to Silver completed successfully."
+                ),
+            },
+        )
+
+        logger.info(
+            "[SILVER][FINNHUB] Processing completed | "
+            "dataset=%s | batch_id=%s",
+            dataset,
+            batch_id,
+        )
+
+        return True
+
+    # ========================================================
+    # SILVER — COMPANY OVERVIEW
+    # ========================================================
 
     def _process_overview_dataset(
         self,
@@ -813,38 +1074,45 @@ class StockPipeline:
         batch_id: str,
     ) -> bool:
         """
-        Execute the Bronze -> Silver processing cycle for Company Overview reference data.
+        Process Company Overview reference data from Bronze to Silver.
 
-        Args:
-            datasource: Data source identifier.
-            execution_start_time: Pipeline execution timestamp.
-            batch_id: Unique batch execution identifier.
-
-        Returns:
-            bool: True if Silver output was written, False if skipped due to no data changes.
+        Flow:
+            1. Extract Bronze overview data.
+            2. Transform into Silver schema.
+            3. Write CSV and Parquet.
+            4. Update overview watermark.
         """
-        overview_dataset = config.get_dataset_name_by_function("OVERVIEW")
-        pipeline_name = "bronze_to_silver"
 
-        logger.info("[OVERVIEW] Starting Bronze-to-Silver cycle for dataset=%s.", overview_dataset)
-
-        # 1. Extract raw JSON overview from Bronze layer
-        extracted_overview_data = self.extractor.extract_bronze_overview_data(
-            datasource=datasource,
-            dataset=overview_dataset,
-            execution_start_time=execution_start_time,
-            batch_id=batch_id
+        overview_dataset = config.get_dataset_name_by_function(
+            "OVERVIEW"
         )
 
-        # 2. Transform raw overview JSON into typed Silver DataFrame
+        pipeline_name = "bronze_to_silver"
+
+        logger.info(
+            "[SILVER][OVERVIEW] Starting processing | "
+            "dataset=%s | batch_id=%s",
+            overview_dataset,
+            batch_id,
+        )
+
+        extracted_overview_data = (
+            self.extractor.extract_bronze_overview_data(
+                datasource=datasource,
+                dataset=overview_dataset,
+                execution_start_time=execution_start_time,
+                batch_id=batch_id,
+            )
+        )
+
         overview_df = silver_transform_overview(
             self.spark,
             extracted_overview_data,
         )
 
-        # 3. Write Silver outputs (CSV & Parquet)
         _write_csv(
             overview_df,
+            datasource,
             self.silver_base_path,
             overview_dataset,
             execution_start_time,
@@ -852,12 +1120,12 @@ class StockPipeline:
 
         _write_parquet(
             overview_df,
+            datasource,
             self.silver_base_path,
             overview_dataset,
             execution_start_time,
         )
 
-        # 4. Update Overview Watermark JSON
         self.watermark_manager.write_watermark(
             watermark={
                 "pipeline_name": pipeline_name,
@@ -868,114 +1136,179 @@ class StockPipeline:
                 "last_processed_at": execution_start_time.isoformat(),
                 "batch_id": batch_id,
                 "status": "SUCCESS",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
                 "updated_by": "stock_pipeline",
-                "remarks": "Bronze to Silver completed. TODO: add content hash value.",
+                "remarks": (
+                    "Bronze to Silver completed. "
+                    "TODO: add content hash value."
+                ),
             },
         )
 
-        logger.info("[OVERVIEW] Bronze-to-Silver overview cycle completed successfully.")
+        logger.info(
+            "[SILVER][OVERVIEW] Processing completed | "
+            "dataset=%s | batch_id=%s",
+            overview_dataset,
+            batch_id,
+        )
+
         return True
 
-    # ============================================================
-    # GOLD LAYER — Join Daily + Overview
-    # ============================================================
+    # ========================================================
+    # GOLD — UNIFIED COMPANY DATASET
+    # ========================================================
 
-    def _build_gold_layer(self, execution_start_time: datetime) -> None:
+    def _build_gold_layer(
+        self,
+        execution_start_time: datetime,
+    ) -> None:
         """
-        Rebuild the Gold layer dataset by joining Silver Daily Time Series
-        and Silver Company Overview reference data on `symbol`.
+        Build the Gold unified dataset from Silver datasets.
 
-        Args:
-            execution_start_time: Pipeline execution timestamp.
+        Silver Daily and Company Overview datasets are joined
+        using the stock symbol.
+
+        Outputs:
+            - Gold CSV
+            - Gold Parquet
         """
-        daily_dataset = config.get_dataset_name_by_function("TIME_SERIES_DAILY")
-        overview_dataset = config.get_dataset_name_by_function("OVERVIEW")
 
-        logger.info("[GOLD] Starting Gold layer build from Silver datasets.")
+        daily_dataset = config.get_dataset_name_by_function(
+            "TIME_SERIES_DAILY"
+        )
+
+        overview_dataset = config.get_dataset_name_by_function(
+            "OVERVIEW"
+        )
+
+        logger.info(
+            "[GOLD] Starting Gold layer build | "
+            "daily_dataset=%s | overview_dataset=%s",
+            daily_dataset,
+            overview_dataset,
+        )
 
         try:
-            # 1. Parquet Path: Read Silver Parquet inputs
-            logger.info("[GOLD] Extracting Silver Parquet DataFrames.")
-
-            daily_parquet = self.extractor.extract_silver_daily_data_parquet(
-                daily_dataset, execution_start_time=execution_start_time,
+            daily_parquet = (
+                self.extractor.extract_silver_daily_data_parquet(
+                    daily_dataset,
+                    execution_start_time=execution_start_time,
+                )
             )
-            overview_parquet = self.extractor.extract_silver_overview_data_parquet(
-                overview_dataset, execution_start_time=execution_start_time,
+
+            overview_parquet = (
+                self.extractor.extract_silver_overview_data_parquet(
+                    overview_dataset,
+                    execution_start_time=execution_start_time,
+                )
             )
 
             daily_parquet = daily_parquet.select(
-                "symbol", "day_date",
-                "open", "high", "low", "close", "volume",
-                "daily_change", "daily_change_percentage", "market_movement",
-                "thirty_day_avg_open", "thirty_day_avg_close",
-                "all_time_high", "all_time_low",
+                "symbol",
+                "day_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "daily_change",
+                "daily_change_percentage",
+                "market_movement",
+                "thirty_day_avg_open",
+                "thirty_day_avg_close",
+                "all_time_high",
+                "all_time_low",
                 "processed_at",
             )
 
-            overview_parquet = overview_parquet.drop("processed_at")
+            overview_parquet = overview_parquet.drop(
+                "processed_at"
+            )
 
             gold_parquet_df = daily_parquet.join(
-                overview_parquet, on="symbol", how="left",
+                overview_parquet,
+                on="symbol",
+                how="left",
             )
 
-            # 2. CSV Path: Read Silver CSV inputs
-            logger.info("[GOLD] Extracting Silver CSV DataFrames.")
-
-            daily_csv = self.extractor.extract_silver_daily_data_csv(
-                daily_dataset, "csv", execution_start_time=execution_start_time,
+            daily_csv = (
+                self.extractor.extract_silver_daily_data_csv(
+                    daily_dataset,
+                    "csv",
+                    execution_start_time=execution_start_time,
+                )
             )
-            overview_csv = self.extractor.extract_silver_overview_data_csv(
-                overview_dataset, "csv", execution_start_time=execution_start_time,
+
+            overview_csv = (
+                self.extractor.extract_silver_overview_data_csv(
+                    overview_dataset,
+                    "csv",
+                    execution_start_time=execution_start_time,
+                )
             )
 
             daily_csv = daily_csv.select(
-                "symbol", "day_date",
-                "open", "high", "low", "close", "volume",
-                "daily_change", "daily_change_percentage", "market_movement",
-                "thirty_day_avg_open", "thirty_day_avg_close",
-                "all_time_high", "all_time_low",
+                "symbol",
+                "day_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "daily_change",
+                "daily_change_percentage",
+                "market_movement",
+                "thirty_day_avg_open",
+                "thirty_day_avg_close",
+                "all_time_high",
+                "all_time_low",
                 "processed_at",
             )
 
-            overview_csv = overview_csv.drop("processed_at")
-
-            gold_csv_df = daily_csv.join(
-                overview_csv, on="symbol", how="left",
+            overview_csv = overview_csv.drop(
+                "processed_at"
             )
 
-            # 3. Write Gold Layer Outputs
-            logger.info("[GOLD] Writing Gold layer dataset (CSV & Parquet).")
+            gold_csv_df = daily_csv.join(
+                overview_csv,
+                on="symbol",
+                how="left",
+            )
 
             _write_csv(
                 gold_csv_df,
+                "stock",
                 self.gold_base_path,
                 "company_dataset",
-                execution_start_time=execution_start_time,
+                execution_start_time,
             )
-
-            logger.info("[GOLD] CSV write completed for dataset=company_dataset.")
 
             _write_parquet(
                 gold_parquet_df,
+                "stock",
                 self.gold_base_path,
                 "company_dataset",
-                execution_start_time=execution_start_time,
+                execution_start_time,
             )
 
-            logger.info("[GOLD] Parquet write completed for dataset=company_dataset.")
+            logger.info(
+                "[GOLD] Gold layer build completed successfully | "
+                "dataset=company_dataset"
+            )
 
         except Exception as e:
             logger.warning(
-                "[GOLD_SKIP] Silver path not found or empty for execution batch timestamp (%s). Skipping Gold build: %s",
+                "[GOLD] Gold layer build skipped | "
+                "execution_time=%s | reason=%s",
                 execution_start_time.isoformat(),
-                e,
+                str(e),
             )
 
-    # ============================================================
-    # PIPELINE ORCHESTRATOR
-    # ============================================================
+    # ========================================================
+    # PIPELINE — END-TO-END ORCHESTRATION
+    # ========================================================
 
     def run(
         self,
@@ -984,147 +1317,211 @@ class StockPipeline:
         full_load: bool = False,
     ) -> list[dict]:
         """
-        Execute the full end-to-end Medallion ETL pipeline.
+        Execute the complete end-to-end Medallion ETL pipeline.
+
+        Pipeline flow:
+
+            Massive API
+                ↓
+            Bronze
+                ↓
+            Silver
+                ↓
+            Gold
+
+        Also processes:
+            Finnhub API → Bronze → Silver
 
         Args:
-            execution_start_time: UTC execution timestamp.
-            stock_symbols: List of stock symbols to process.
-            full_load: Whether to perform a full historical load.
+            execution_start_time:
+                UTC timestamp for the pipeline execution.
 
-        Returns:
-            List of ingestion result dictionaries.
+            stock_symbols:
+                Stock symbols to process.
+
+            full_load:
+                Whether the pipeline should perform a full load.
         """
 
-        logger.info("[PIPELINE] Starting end-to-end ETL execution.")
+        batch_id = (
+            f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
+        )
 
-        batch_id = f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
+        pipeline_start_time = datetime.now(
+            timezone.utc
+        )
+
+        logger.info(
+            "[PIPELINE] Starting ETL execution | "
+            "batch_id=%s | execution_start_time=%s | "
+            "full_load=%s | symbols=%s",
+            batch_id,
+            execution_start_time.isoformat(),
+            full_load,
+            stock_symbols,
+        )
 
         try:
-            # Step 1: API Ingestion -> Bronze
-            results_massive = self._ingest_from_massive_api(
+            logger.info(
+                "[PIPELINE][STEP 1/6] Massive API → Bronze | "
+                "batch_id=%s",
                 batch_id,
-                execution_start_time,
-                symbol="IBM",
             )
 
-            results_finnhub = self._ingest_from_finnhub_api(
-                batch_id,
-                execution_start_time,
-            )
-
-            logger.info("[PIPELINE] Finnhub ingestion results: %s", results_finnhub)
-
-            # Step 2: Bronze -> Silver processing
-            massive_exchange_processing = self._process_massive_exchange_dataset(
-                "massive",
-                "exchanges",
-                execution_start_time,
-                batch_id,
+            results_massive = (
+                self._ingest_from_massive_api(
+                    batch_id,
+                    execution_start_time,
+                    symbol="IBM",
+                )
             )
 
             logger.info(
-                "[PIPELINE][SILVER] Exchanges processing completed | "
+                "[PIPELINE][STEP 1/6] Massive API → Bronze completed."
+            )
+
+            logger.info(
+                "[PIPELINE][STEP 2/6] Finnhub API → Bronze | "
+                "batch_id=%s",
+                batch_id,
+            )
+
+            results_finnhub = (
+                self._ingest_from_finnhub_api(
+                    batch_id,
+                    execution_start_time,
+                )
+            )
+
+            logger.info(
+                "[PIPELINE][STEP 2/6] Finnhub API → Bronze completed."
+            )
+
+            logger.info(
+                "[PIPELINE][STEP 3/6] Bronze → Silver | Exchanges."
+            )
+
+            massive_exchange_processing = (
+                self._process_massive_exchange_dataset(
+                    datasource="massive",
+                    dataset="exchanges",
+                    execution_start_time=execution_start_time,
+                    batch_id=batch_id,
+                )
+            )
+
+            logger.info(
+                "[PIPELINE][STEP 3/6] Exchanges processing completed | "
                 "written=%s",
                 massive_exchange_processing,
             )
 
-            stock_overview_processing = self._process_massive_dataset(
-                "massive",
-                "stock_overview",
-                execution_start_time,
-                batch_id,
+            logger.info(
+                "[PIPELINE][STEP 4/6] Bronze → Silver | Stock Overview."
+            )
+
+            stock_overview_processing = (
+                self._process_massive_dataset(
+                    "massive",
+                    "stock_overview",
+                    execution_start_time,
+                    batch_id,
+                )
             )
 
             logger.info(
-                "[PIPELINE][SILVER] Stock overview processing completed | "
+                "[PIPELINE][STEP 4/6] Stock Overview processing completed | "
                 "written=%s",
                 stock_overview_processing,
             )
 
-            aggregates_processing = self._process_massive_dataset(
-                "massive",
-                "aggregates",
-                execution_start_time,
-                batch_id,
+            logger.info(
+                "[PIPELINE][STEP 5/6] Bronze → Silver | "
+                "Aggregates + Dividends + Ticker Reference."
+            )
+
+            aggregates_processing = (
+                self._process_massive_dataset(
+                    "massive",
+                    "aggregates",
+                    execution_start_time,
+                    batch_id,
+                )
+            )
+
+            dividends_processing = (
+                self._process_massive_dataset(
+                    "massive",
+                    "dividends",
+                    execution_start_time,
+                    batch_id,
+                )
+            )
+
+            stocks_list_processing = (
+                self._process_finnhub_dataset(
+                    "finnhub",
+                    "ticker_reference",
+                    execution_start_time,
+                    batch_id,
+                )
             )
 
             logger.info(
-                "[PIPELINE][SILVER] Aggregates processing completed | "
-                "written=%s",
+                "[PIPELINE][STEP 5/6] Silver processing completed | "
+                "aggregates=%s | dividends=%s | ticker_reference=%s",
                 aggregates_processing,
-            )
-
-            dividends_processing = self._process_massive_dataset(
-                "massive",
-                "dividends",
-                execution_start_time,
-                batch_id,
-            )
-            logger.info(
-                "[PIPELINE][SILVER] Dividends processing completed | "
-                "written=%s",
                 dividends_processing,
-            )
-
-            stocks_list_processing = self._process_massive_dataset(
-                "finnhub",
-                "ticker_reference",
-                execution_start_time,
-                batch_id,
-            )
-
-            logger.info(
-                "[PIPELINE][SILVER] Stocks list processing completed | "
-                "written=%s",
                 stocks_list_processing,
             )
 
             logger.info(
-                "[PIPELINE][GOLD] Unified Gold dataset rebuilt and persisted."
+                "[PIPELINE][STEP 6/6] Silver → Gold."
             )
 
-            # Execution duration metric
-            duration = (
-                datetime.now(timezone.utc) - execution_start_time
+            self._build_gold_layer(
+                execution_start_time
+            )
+
+            logger.info(
+                "[PIPELINE][STEP 6/6] Gold processing completed."
+            )
+
+            pipeline_duration = (
+                datetime.now(timezone.utc)
+                - pipeline_start_time
             ).total_seconds()
 
             logger.info(
-                "\n"
-                "============================================================\n"
-                "               PIPELINE EXECUTION METRICS SUMMARY           \n"
-                "============================================================\n"
-                " Batch ID         : %s\n"
-                " Execution Time   : %s\n"
-                " Duration         : %.2f seconds\n"
-                " Target Symbols   : %s\n"
-                " Silver Exchanges : %s\n"
-                " Silver Aggregates: %s\n"
-                " Silver Dividends : %s\n"
-                " Silver Overview  : %s\n"
-                " Massive Ingest   : %s\n"
-                " Gold Dataset     : Rebuilt & Persisted\n"
-                "============================================================",
+                "[PIPELINE] ETL execution completed successfully | "
+                "batch_id=%s | duration_seconds=%.2f | "
+                "silver_exchanges=%s | "
+                "silver_overview=%s | "
+                "silver_aggregates=%s | "
+                "silver_dividends=%s | "
+                "silver_ticker_reference=%s",
                 batch_id,
-                execution_start_time.isoformat(),
-                duration,
-                stock_symbols,
-                "WRITTEN" if massive_exchange_processing else "SKIPPED",
-                "WRITTEN" if aggregates_processing else "SKIPPED",
-                "WRITTEN" if dividends_processing else "SKIPPED",
-                "WRITTEN" if stock_overview_processing else "SKIPPED",
-                results_massive,
+                pipeline_duration,
+                massive_exchange_processing,
+                stock_overview_processing,
+                aggregates_processing,
+                dividends_processing,
+                stocks_list_processing,
             )
 
             return "success"
 
         except Exception:
-            duration = (
-                datetime.now(timezone.utc) - execution_start_time
+            pipeline_duration = (
+                datetime.now(timezone.utc)
+                - pipeline_start_time
             ).total_seconds()
 
             logger.exception(
-                "[PIPELINE] ETL pipeline execution failed after %.2f seconds.",
-                duration,
+                "[PIPELINE] ETL execution failed | "
+                "batch_id=%s | duration_seconds=%.2f",
+                batch_id,
+                pipeline_duration,
             )
 
             raise
