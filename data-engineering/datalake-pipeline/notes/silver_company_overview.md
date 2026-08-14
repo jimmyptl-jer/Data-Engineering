@@ -23,9 +23,7 @@ Hash-based comparison using SHA-256 digest on 52 business columns (`WATERMARK_ST
 
 ---
 
-## 3. Key Schema & Field Specifications (Selected Core Attributes)
-
-This dataset standardizes 52 fundamental business attributes from PascalCase to snake_case:
+## 3. Complete Schema & Field Specifications (All 53 Attributes)
 
 | Field Name | Data Type | Nullable | Canonical Format / Rule | Description |
 |---|---|---|---|---|
@@ -39,6 +37,8 @@ This dataset standardizes 52 fundamental business attributes from PascalCase to 
 | `sector` | `STRING` | Yes | Lowercase text, Default: `Unknown` | Industry sector classification |
 | `industry` | `STRING` | Yes | Lowercase text, Default: `Unknown` | Specific industry specialization |
 | `official_site` | `STRING` | Yes | URL string, Default: `Not Available` | Corporate website URL |
+| `fiscal_year_end` | `STRING` | Yes | Lowercase text (e.g., `december`) | Fiscal year-end month |
+| `latest_quarter` | `DATE` | Yes | ISO 8601 `YYYY-MM-DD` | End date of latest reported fiscal quarter |
 | `market_cap` | `LONG` | Yes | Numeric integer | Total market capitalization ($) |
 | `ebitda` | `LONG` | Yes | Numeric integer | Earnings before interest, taxes, dep. |
 | `pe_ratio` | `DOUBLE` | Yes | Floating point number | Price-to-Earnings ratio |
@@ -47,14 +47,43 @@ This dataset standardizes 52 fundamental business attributes from PascalCase to 
 | `dividend_per_share` | `DOUBLE` | Yes | Floating point currency | Annual dividend payment per share |
 | `dividend_yield` | `DOUBLE` | Yes | Percentage decimal | Annual dividend yield |
 | `eps` | `DOUBLE` | Yes | Floating point currency | Earnings Per Share (TTM) |
+| `revenue_per_share_ttm` | `DOUBLE` | Yes | Floating point currency | Revenue per share (TTM) |
 | `profit_margin` | `DOUBLE` | Yes | Floating point percentage | Profit margin ratio |
+| `operating_margin_ttm` | `DOUBLE` | Yes | Floating point percentage | Operating margin ratio (TTM) |
+| `return_on_assets_ttm` | `DOUBLE` | Yes | Floating point percentage | Return on assets (TTM) |
+| `return_on_equity_ttm` | `DOUBLE` | Yes | Floating point percentage | Return on equity (TTM) |
 | `revenue_ttm` | `LONG` | Yes | Numeric integer | Total trailing 12-month revenue |
-| `shares_outstanding` | `LONG` | Yes | Total share count | Shares outstanding |
+| `gross_profit_ttm` | `LONG` | Yes | Numeric integer | Gross profit (TTM) |
+| `diluted_eps_ttm` | `DOUBLE` | Yes | Floating point currency | Diluted earnings per share (TTM) |
+| `quarterly_earnings_growth_yoy` | `DOUBLE` | Yes | Floating point percentage | YoY quarterly earnings growth |
+| `quarterly_revenue_growth_yoy` | `DOUBLE` | Yes | Floating point percentage | YoY quarterly revenue growth |
+| `analyst_target_price` | `DOUBLE` | Yes | Floating point currency | Wall Street consensus target price |
+| `analyst_rating_strong_buy` | `INTEGER` | Yes | Integer count | Analyst Strong Buy rating count |
+| `analyst_rating_buy` | `INTEGER` | Yes | Integer count | Analyst Buy rating count |
+| `analyst_rating_hold` | `INTEGER` | Yes | Integer count | Analyst Hold rating count |
+| `analyst_rating_sell` | `INTEGER` | Yes | Integer count | Analyst Sell rating count |
+| `analyst_rating_strong_sell` | `INTEGER` | Yes | Integer count | Analyst Strong Sell rating count |
+| `trailing_pe` | `DOUBLE` | Yes | Floating point number | Trailing 12-month P/E ratio |
+| `forward_pe` | `DOUBLE` | Yes | Floating point number | Forward 12-month projected P/E ratio |
+| `price_to_sales_ratio_ttm` | `DOUBLE` | Yes | Floating point number | Price-to-Sales ratio (TTM) |
+| `price_to_book_ratio` | `DOUBLE` | Yes | Floating point number | Price-to-Book ratio |
+| `ev_to_revenue` | `DOUBLE` | Yes | Floating point number | Enterprise Value-to-Revenue ratio |
+| `ev_to_ebitda` | `DOUBLE` | Yes | Floating point number | Enterprise Value-to-EBITDA ratio |
+| `beta` | `DOUBLE` | Yes | Floating point number | Stock volatility Beta relative to market |
 | `fifty_two_week_high` | `DOUBLE` | Yes | Floating point currency | 52-week peak stock price |
 | `fifty_two_week_low` | `DOUBLE` | Yes | Floating point currency | 52-week trough stock price |
-| `fifty_day_moving_average`| `DOUBLE` | Yes | Floating point currency | 50-day moving average price |
-| `two_hundred_day_moving_average`| `DOUBLE` | Yes | Floating point currency | 200-day moving average price |
-| `processed_at` | `TIMESTAMP`| No | UTC timestamp | Transformation execution time |
+| `fifty_day_moving_average` | `DOUBLE` | Yes | Floating point currency | 50-day moving average price |
+| `two_hundred_day_moving_average` | `DOUBLE` | Yes | Floating point currency | 200-day moving average price |
+| `shares_outstanding` | `LONG` | Yes | Total share count | Total shares outstanding |
+| `shares_float` | `LONG` | Yes | Total share count | Publicly tradable float share count |
+| `percent_insiders` | `DOUBLE` | Yes | Floating point percentage | Percentage held by corporate insiders |
+| `percent_institutions` | `DOUBLE` | Yes | Floating point percentage | Percentage held by institutional investors |
+| `dividend_date` | `DATE` | Yes | ISO 8601 `YYYY-MM-DD` | Dividend payment date |
+| `ex_dividend_date` | `DATE` | Yes | ISO 8601 `YYYY-MM-DD` | Ex-dividend date |
+| `year` | `INTEGER` | No | `YYYY` derived execution year | Partition year |
+| `month` | `INTEGER` | No | `MM` (1-12) derived execution month | Partition month |
+| `day` | `INTEGER` | No | `DD` (1-31) derived execution day | Partition day |
+| `processed_at` | `TIMESTAMP` | No | UTC timestamp | Transformation execution timestamp |
 
 ---
 
