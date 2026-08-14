@@ -91,21 +91,33 @@ datalake-pipeline/
 ├── src/
 │   ├── __init__.py
 │   │
-│   ├── stock_pipeline/               # Core ETL pipeline
-│   │   ├── __init__.py
-│   │   ├── app.py                    # Pipeline orchestrator + Lambda handler
-│   │   ├── config.py                 # Centralized configuration
-│   │   ├── extract.py                # Bronze/Silver data extractors
-│   │   ├── transform.py              # Silver transformations
-│   │   ├── load.py                   # S3 Bronze writer (boto3)
-│   │   ├── utils.py                  # API key manager
-│   │   └── ingestion/
-│   │       └── alpha_vantage_ingestion.py  # API ingestion orchestrator
-│   │
-│   └── watermark/                    # Reusable watermark framework
+│   └── stock_pipeline/               # Core Data Engineering Pipeline
 │       ├── __init__.py
-│       ├── config.py                 # Watermark S3 paths
-│       └── manager.py                # WatermarkManager class
+│       ├── app.py                    # Entry Point: AWS Lambda handler & local CLI runner
+│       ├── pipeline.py               # Core Orchestrator: StockPipeline class & Spark helpers
+│       ├── config.py                 # Centralized configuration & environment settings
+│       ├── utils.py                  # API Key Manager & rotation utilities
+│       ├── extract.py                # PySpark explicit schemas & Bronze/Silver data extractors
+│       ├── load.py                   # Low-level boto3 S3 Bronze layer uploader
+│       ├── database.py               # Placeholder for relational DB integration
+│       │
+│       ├── ingestion/                # Raw API Ingestion Layer (API → S3 Bronze)
+│       │   ├── __init__.py
+│       │   ├── alpha_vantage_ingestion.py  # Alpha Vantage market data & fundamental ingestion
+│       │   ├── massive_ingestion.py        # Massive (Polygon.io) market data & reference ingestion
+│       │   └── finnhub_ingestion.py        # Finnhub stock ticker reference data ingestion
+│       │
+│       ├── transform/                # Bronze-to-Silver PySpark Transformation Package
+│       │   ├── __init__.py
+│       │   ├── daily.py               # Daily time series (watermark, DQ assertions, rolling aggs, lag)
+│       │   ├── weekly.py              # Weekly time series (DQ rules, metrics)
+│       │   ├── overview.py            # Company overview fundamental reference data
+│       │   └── exchanges.py           # Massive exchanges reference data
+│       │
+│       └── watermark/                # Reusable Watermark State Manager
+│           ├── __init__.py
+│           ├── config.py             # Watermark S3 paths
+│           └── manager.py            # WatermarkManager class (Hadoop FileSystem API)
 │
 ├── tests/
 │   └── test_stock_config.py          # Configuration tests
@@ -113,8 +125,6 @@ datalake-pipeline/
 ├── data/                             # Local data (gitignored)
 │   ├── raw/
 │   └── processed/
-│
-├── scripts/                          # Utility scripts
 │
 ├── .env.example                      # Environment variable template
 ├── .gitignore
@@ -493,22 +503,26 @@ Silver / Gold S3 ──► AWS Glue Crawler ──► Glue Data Catalog ──�
 
 ## Module Reference
 
+### Orchestration & Entry Point
+
+- **Entry Point File:** [`app.py`](src/stock_pipeline/app.py)  
+  Exposes `lambda_handler(event, context)` for AWS Lambda execution and the `if __name__ == "__main__":` block for local CLI testing.
+- **Pipeline Orchestrator:** [`pipeline.py`](src/stock_pipeline/pipeline.py)  
+  Contains the `StockPipeline` class which coordinates ingestion, extraction, transformation, watermark state management, and S3 parquet/csv writing.
+
+---
+
 ### Ingestion Layer
 
-**File:** [`alpha_vantage_ingestion.py`](src/stock_pipeline/ingestion/alpha_vantage_ingestion.py)
+**Package:** `src/stock_pipeline/ingestion/`
 
-Handles the API-to-Bronze flow:
+Handles fetching raw data from external market APIs and landing JSON files into S3 Bronze:
 
-1. Selects a random API key from the key pool (supports 16 key rotation).
-2. Calls the Alpha Vantage REST API.
-3. Validates the response (guards against rate-limit/error payloads).
-4. Uploads raw JSON to S3 Bronze via boto3.
-
-```python
-class AlphaVantageIngestion:
-    def ingest(self, symbol, function, dataset, execution_start_time):
-        """Fetch from API → validate → upload to S3 Bronze."""
-```
+| Module | Source API | Datasets Ingested |
+|--------|------------|-------------------|
+| [`alpha_vantage_ingestion.py`](src/stock_pipeline/ingestion/alpha_vantage_ingestion.py) | Alpha Vantage REST | Daily Time Series, Company Overview |
+| [`massive_ingestion.py`](src/stock_pipeline/ingestion/massive_ingestion.py) | Massive (Polygon.io) | Exchanges, Aggregates/OHLCV, Splits, Dividends, Stock Overview |
+| [`finnhub_ingestion.py`](src/stock_pipeline/ingestion/finnhub_ingestion.py) | Finnhub REST | Ticker Reference / Stock symbols list |
 
 ---
 
@@ -516,10 +530,10 @@ class AlphaVantageIngestion:
 
 **File:** [`extract.py`](src/stock_pipeline/extract.py)
 
-Reads data from S3 into Spark DataFrames using explicit schemas:
+Reads data from S3 into PySpark DataFrames using explicit `StructType` schemas to avoid schema inference overhead:
 
-| Method | Source | Format |
-|--------|--------|--------|
+| Method | Source Layer | Format |
+|--------|--------------|--------|
 | `extract_bronze_daily_data()` | Bronze | JSON |
 | `extract_bronze_overview_data()` | Bronze | JSON |
 | `extract_bronze_weekly_data()` | Bronze | JSON |
@@ -532,17 +546,16 @@ Reads data from S3 into Spark DataFrames using explicit schemas:
 
 ### Transform Layer
 
-**File:** [`transform.py`](src/stock_pipeline/transform.py)
+**Package:** `src/stock_pipeline/transform/`
 
-Transforms raw Bronze DataFrames into clean, validated, enriched Silver DataFrames.
+Transforms raw Bronze DataFrames into cleaned, validated, enriched Silver DataFrames:
 
-#### Daily Time Series Transform
-
-`silver_transform_daily_timeseries(daily_dataset, data_df, watermark_value=None)`
-
-#### Company Overview Transform
-
-`silver_transform_overview(data_df)`
+| Module | Dataset Processed | Key Transformation Features |
+|--------|-------------------|-----------------------------|
+| [`daily.py`](src/stock_pipeline/transform/daily.py) | Daily Time Series | Date Watermark filter, DQ Quarantine audit, 30d rolling avg, 52w high/low, all-time high/low, windowed lag features |
+| [`overview.py`](src/stock_pipeline/transform/overview.py) | Company Overview | 52 business columns selection, snake_case mapping, fake null normalization, default value imputation, explicit type casting |
+| [`weekly.py`](src/stock_pipeline/transform/weekly.py) | Weekly Time Series | Weekly OHLCV flattening, DQ validation assertions, metric enrichment (weekly_change %, Bull/Bear) |
+| [`exchanges.py`](src/stock_pipeline/transform/exchanges.py) | Massive Exchanges | Reference data cleaning, code standardization (MIC, type), validation reason tagging |
 
 ---
 
@@ -550,15 +563,15 @@ Transforms raw Bronze DataFrames into clean, validated, enriched Silver DataFram
 
 **File:** [`load.py`](src/stock_pipeline/load.py)
 
-Handles S3 uploads for the Bronze layer using `boto3.client('s3').put_object()`.
+Handles S3 uploads for raw JSON payloads landed into the Bronze layer using `boto3.client('s3').put_object()`.
 
 ---
 
 ### Watermark Framework
 
-**File:** [`watermark/manager.py`](src/watermark/manager.py)
+**File:** [`manager.py`](src/stock_pipeline/watermark/manager.py)
 
-A **reusable** watermark manager that tracks pipeline state for incremental processing.
+A **reusable** state manager that tracks pipeline watermarks for incremental ETL execution across S3:
 
 ```python
 class WatermarkManager:
@@ -573,7 +586,7 @@ class WatermarkManager:
 
 **File:** [`config.py`](src/stock_pipeline/config.py)
 
-Centralized pipeline settings and endpoint mapping.
+Centralized pipeline parameters, Alpha Vantage endpoint definitions, watermark strategies, and S3 URI paths.
 
 ---
 
@@ -866,21 +879,22 @@ Characteristics:
 |-----------|--------|
 | Python + PySpark foundation | ✅ |
 | SparkSession + AWS S3 integration | ✅ |
-| Modular project structure | ✅ |
+| Modular project structure (`pipeline.py`, `app.py`, `transform/`, `ingestion/`, `watermark/`) | ✅ |
 | Structured logging framework | ✅ |
 | Configuration management | ✅ |
-| Alpha Vantage API ingestion (Daily + Overview) | ✅ |
+| Multi-API Ingestion (Alpha Vantage, Massive/Polygon.io, Finnhub) | ✅ |
 | Bronze layer (raw JSON, time-partitioned, immutable) | ✅ |
-| Silver Daily transformation (15-step pipeline) | ✅ |
-| Silver Overview transformation (8-step pipeline) | ✅ |
-| Data Quality quarantine pattern | ✅ |
+| Silver Daily transformation (17-step pipeline with lag & rolling aggs) | ✅ |
+| Silver Overview transformation (8-step fundamental data pipeline) | ✅ |
+| Silver Exchanges transformation (Massive reference data) | ✅ |
+| Data Quality quarantine pattern (`VALID` / `INVALID` auditing) | ✅ |
 | CSV + Parquet dual-format Silver writer | ✅ |
 | Gold layer (Daily + Overview join) | ✅ |
-| WatermarkManager (reusable framework) | ✅ |
+| WatermarkManager (consolidated inside `stock_pipeline/watermark/`) | ✅ |
 | Date-based incremental loading (Daily) | ✅ |
-| Pipeline refactoring into reusable methods | ✅ |
+| Full codebase comment enrichment & docstring standardization | ✅ |
 | AWS SAM Infrastructure as Code (`template.yaml`) | ✅ |
-| Code cleanup (print → logger, dead code removed) | ✅ |
+| Code cleanup (`print()` → `logger`, dead code `old-app.py` deleted) | ✅ |
 
 ### 🔄 In Progress
 

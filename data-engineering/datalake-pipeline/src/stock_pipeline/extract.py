@@ -194,7 +194,10 @@ class StockDataExtractor:
         )
 
     def _silver_bucket_key(
-        self, dataset: str, data_format: str, execution_start_time: datetime,
+        self, 
+        dataset: str, 
+        data_format: str, 
+        execution_start_time: datetime,
     ) -> str:
         """
         Build fully qualified S3 URI prefix for Silver layer partitions.
@@ -330,45 +333,7 @@ class StockDataExtractor:
         except Exception as e:
             logger.exception("[EXTRACT][BRONZE_DAILY_FAIL] Failed reading daily data: %s", e)
             raise
-        
-    def extract_bronze_exchange_data(
-        self,
-        datasource:str,
-        dataset: str, 
-        execution_start_time: datetime,
-        batch_id:str
-        ) -> DataFrame:
-            """
-            Extract raw daily time-series JSON files from Bronze S3 partition into a Spark DataFrame.
     
-            Args:
-                dataset: Dataset partition folder name.
-                execution_start_time: Execution start timestamp.
-    
-            Returns:
-                DataFrame: Spark DataFrame matching `stock_schema_daily`.
-            """
-            bucket_key = self._bronze_bucket_key(datasource,dataset, execution_start_time,run_id=batch_id)
-            logger.info("[EXTRACT][BRONZE_DAILY] Reading JSON files from: %s", bucket_key)
-    
-            if not self._path_exists(bucket_key):
-                logger.warning("[EXTRACT][BRONZE_DAILY_SKIP] S3 partition path does not exist: %s. Returning empty DataFrame.", bucket_key)
-                return self.spark.createDataFrame([], schema=stock_schema_daily)
-    
-            try:
-                df = (
-                    self.spark.read
-                    .format("json")
-                    .option("multiLine", "true")
-                    .option("recursiveFileLookup", "true")
-                    .load(bucket_key)
-                )
-                logger.info("[EXTRACT][BRONZE_DAILY_OK] Extraction completed.")
-                return df
-    
-            except Exception as e:
-                logger.exception("[EXTRACT][BRONZE_DAILY_FAIL] Failed reading daily data: %s", e)
-                raise
 
     def extract_bronze_overview_data(
         self,
@@ -416,10 +381,8 @@ class StockDataExtractor:
 
     def extract_silver_daily_data_parquet(
         self,
-        datasource:str,
         dataset: str, 
         execution_start_time: datetime,
-        batch_id:str
     ) -> DataFrame:
         """
         Extract processed daily time-series Parquet files from Silver S3 layer.
@@ -472,6 +435,7 @@ class StockDataExtractor:
             df = (
                 self.spark.read
                 .option("header", "true")
+                .option("inferSchema", "true")
                 .format(data_format)
                 .load(bucket_key)
             )
@@ -536,6 +500,7 @@ class StockDataExtractor:
             df = (
                 self.spark.read
                 .option("header", "true")
+                .option("inferSchema", "true")
                 .format(data_format)
                 .load(bucket_key)
             )
@@ -544,4 +509,115 @@ class StockDataExtractor:
 
         except Exception as e:
             logger.exception("[EXTRACT][SILVER_OVERVIEW_CSV_FAIL] Failed reading overview CSV: %s", e)
+            raise
+
+
+class MassiveApiExtractor:
+  
+    def __init__(self, spark: SparkSession):
+        self.spark = spark
+        self.bucket_name = config.S3_BUCKET_NAME
+
+    def _path_exists(self, path_str: str) -> bool:
+        """
+        Check whether a path exists on the storage filesystem (S3/HDFS/local).
+        """
+        try:
+            gateway = self.spark.sparkContext._jvm
+            hadoop_path = gateway.org.apache.hadoop.fs.Path(path_str)
+            conf = self.spark.sparkContext._jsc.hadoopConfiguration()
+
+            file_system = gateway.org.apache.hadoop.fs.FileSystem.get(
+                hadoop_path.toUri(),
+                conf,
+            )
+
+            return file_system.exists(hadoop_path)
+
+        except Exception as e:
+            logger.debug(
+                "[EXTRACT][PATH_CHECK] Path existence check exception for %s: %s",
+                path_str,
+                e,
+            )
+            return False
+
+    def _bronze_bucket_key(
+        self,
+        datasource: str,
+        dataset: str,
+        execution_start_time: datetime,
+        run_id: str,
+    ) -> str:
+
+        ingestion_date = execution_start_time.strftime("%Y-%m-%d")
+
+        return (
+            f"s3a://{self.bucket_name}/"
+            f"stock/bronze/"
+            f"source={datasource}/"
+            f"dataset={dataset}/"
+            f"ingestion_date={ingestion_date}/"
+            f"run_id={run_id}/"
+        )
+
+    def extract_from_bronze_layer(
+        self,
+        datasource: str,
+        dataset: str,
+        execution_start_time: datetime,
+        batch_id: str,
+    ) -> DataFrame:
+
+        bucket_key = self._bronze_bucket_key(
+            datasource=datasource,
+            dataset=dataset,
+            execution_start_time=execution_start_time,
+            run_id=batch_id,
+        )
+
+        if not self._path_exists(bucket_key):
+            logger.warning(
+                "[EXTRACT_MASSIVE_DATASET] "
+                "S3 partition path does not exist: %s",
+                bucket_key,
+            )
+            raise FileNotFoundError(
+                f"Path does not exist: {bucket_key}"
+            )
+
+        try:
+            logger.info(
+                "[EXTRACT_MASSIVE_DATASET] Reading Bronze data: %s",
+                bucket_key,
+            )
+
+            df = (
+                self.spark.read
+                .format("json")
+                .option("recursiveFileLookup", "true")
+                .load(bucket_key)
+            )
+
+            logger.info(
+                "[EXTRACT_MASSIVE_DATASET] Schema for dataset=%s",
+                dataset,
+            )
+
+            df.printSchema()
+
+            logger.info(
+                "[EXTRACT_MASSIVE_DATASET] Sample data for dataset=%s",
+                dataset,
+            )
+
+            df.show(5, truncate=False)
+
+            return df
+
+        except Exception:
+            logger.exception(
+                "[EXTRACT_MASSIVE_DATASET] Failed to read dataset=%s",
+                dataset,
+            )
             raise
