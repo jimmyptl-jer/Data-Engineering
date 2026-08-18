@@ -83,9 +83,6 @@ def transform_massive_exchanges_dataset(
     # STEP 1: START MASSIVE EXCHANGES TRANSFORMATION
     # ============================================================
 
-    print("\n" + "=" * 80)
-    print("STEP 1: MASSIVE EXCHANGES — BRONZE → SILVER")
-    print("=" * 80)
 
     logger.info(
         "[MASSIVE][EXCHANGES] Starting Bronze-to-Silver "
@@ -98,9 +95,6 @@ def transform_massive_exchanges_dataset(
         # STEP 2: SELECT + CAST
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 2: SELECT + CAST EXCHANGE DATA")
-        print("=" * 80)
 
         exchange_df = data_df.select(
             "asset_class",
@@ -131,9 +125,6 @@ def transform_massive_exchanges_dataset(
         # STEP 3: TRIM WHITESPACE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 3: TRIM WHITESPACE")
-        print("=" * 80)
 
         required_string_cols = [
             "asset_class",
@@ -158,9 +149,6 @@ def transform_massive_exchanges_dataset(
         # STEP 4: NORMALIZE FAKE NULL VALUES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 4: NORMALIZE FAKE NULL VALUES")
-        print("=" * 80)
 
         fake_null_values = [
             "",
@@ -188,9 +176,6 @@ def transform_massive_exchanges_dataset(
         # STEP 5: VALIDATION STATUS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 5: APPLY EXCHANGE VALIDATION")
-        print("=" * 80)
 
         exchange_df = exchange_df.withColumn(
             "validation_status",
@@ -212,9 +197,6 @@ def transform_massive_exchanges_dataset(
         # STEP 6: VALIDATION REASON
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 6: GENERATE VALIDATION REASONS")
-        print("=" * 80)
 
         exchange_df = exchange_df.withColumn(
             "validation_reason",
@@ -238,9 +220,6 @@ def transform_massive_exchanges_dataset(
         # STEP 7: STANDARDIZE CASING
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 7: STANDARDIZE EXCHANGE CASING")
-        print("=" * 80)
 
         exchange_df = exchange_df.withColumn(
             "mic",
@@ -265,21 +244,6 @@ def transform_massive_exchanges_dataset(
         # STEP 8: ROW COUNT METRICS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 8: MASSIVE EXCHANGES ROW COUNT METRICS")
-        print("=" * 80)
-
-        total_in = data_df.count()
-        total_out = exchange_df.count()
-
-        valid_count = exchange_df.filter(
-            col("validation_status") == "VALID"
-        ).count()
-
-        invalid_count = exchange_df.filter(
-            col("validation_status") == "INVALID"
-        ).count()
-
         logger.info(
             "[MASSIVE][EXCHANGES][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",
@@ -289,18 +253,10 @@ def transform_massive_exchanges_dataset(
             invalid_count,
         )
 
-        print(f"Total In      : {total_in}")
-        print(f"Total Out     : {total_out}")
-        print(f"Valid Records : {valid_count}")
-        print(f"Invalid       : {invalid_count}")
-
         # ========================================================
         # STEP 9: RETURN SILVER DATAFRAME
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 9: MASSIVE EXCHANGES TRANSFORMATION COMPLETED")
-        print("=" * 80)
 
         logger.info(
             "[MASSIVE][EXCHANGES] Bronze-to-Silver transformation "
@@ -310,10 +266,6 @@ def transform_massive_exchanges_dataset(
         return exchange_df
 
     except Exception:
-
-        print("\n" + "!" * 80)
-        print("MASSIVE EXCHANGES TRANSFORMATION FAILED")
-        print("!" * 80)
 
         logger.exception(
             "[MASSIVE][EXCHANGES] Error processing exchanges "

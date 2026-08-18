@@ -40,6 +40,7 @@ from .transform.daily import silver_transform_daily_timeseries
 from .transform.overview import silver_transform_overview
 from .transform.exchanges import transform_massive_exchanges_dataset
 from .transform.stock_tickers import transform_finnhub_stock_tickers_dataset
+from .transform.stock_overview_massive import transform_massive_stock_overview
 
 
 logger = logging.getLogger(__name__)
@@ -126,9 +127,6 @@ def _write_parquet(
                 f"dataset={dataset_name}/"
                 f"year={execution_start_time.year}/"
                 f"month={execution_start_time.month:02d}/"
-                f"day={execution_start_time.day:02d}/"
-                f"hour={execution_start_time.hour:02d}/"
-                f"minute={execution_start_time.minute:02d}/"
                 f"format=parquet/"
             )
         )
@@ -186,9 +184,6 @@ def _write_csv(
                 f"dataset={dataset_name}/"
                 f"year={execution_start_time.year}/"
                 f"month={execution_start_time.month:02d}/"
-                f"day={execution_start_time.day:02d}/"
-                f"hour={execution_start_time.hour:02d}/"
-                f"minute={execution_start_time.minute:02d}/"
                 f"format=csv/"
             )
         )
@@ -936,7 +931,102 @@ class StockPipeline:
         )
 
         return True
+    
+   # ========================================================
+    # SILVER — MASSIVE STOCK OVERVIEW
+    # ========================================================
 
+    def _process_massive_stock_overview_dataset(
+        self,
+        datasource: str,
+        dataset: str,
+        execution_start_time: datetime,
+        batch_id: str,
+    ) -> bool:
+        """
+        Process Massive Stock Overview data from Bronze to Silver.
+
+        This function:
+            1. Extracts the Massive Stock Overview dataset from Bronze.
+            2. Transforms the Bronze data into a standardized Silver DataFrame.
+            3. Writes the transformed data to CSV and Parquet in Silver.
+        """
+
+        try:
+            stock_overview_dataset = (
+                self.massive_data_extractor.extract_from_bronze_layer(
+                    datasource=datasource,
+                    dataset=dataset,
+                    execution_start_time=execution_start_time,
+                    batch_id=batch_id,
+                )
+            )
+
+            if stock_overview_dataset is None:
+                logger.warning(
+                    "[SILVER][MASSIVE][STOCK_OVERVIEW] "
+                    "No Bronze data found | "
+                    "datasource=%s | dataset=%s | batch_id=%s",
+                    datasource,
+                    dataset,
+                    batch_id,
+                )
+                return False
+
+            stock_overview_df = transform_massive_stock_overview(
+                self.spark,
+                stock_overview_dataset,
+            )
+
+            if stock_overview_df is None:
+                logger.warning(
+                    "[SILVER][MASSIVE][STOCK_OVERVIEW] "
+                    "Transformation returned no data | "
+                    "datasource=%s | dataset=%s | batch_id=%s",
+                    datasource,
+                    dataset,
+                    batch_id,
+                )
+                return False
+
+            _write_csv(
+                stock_overview_df,
+                datasource,
+                self.silver_base_path,
+                dataset,
+                execution_start_time,
+            )
+
+            _write_parquet(
+                stock_overview_df,
+                datasource,
+                self.silver_base_path,
+                dataset,
+                execution_start_time,
+            )
+
+            logger.info(
+                "[SILVER][MASSIVE][STOCK_OVERVIEW] "
+                "Processing completed | "
+                "datasource=%s | dataset=%s | batch_id=%s",
+                datasource,
+                dataset,
+                batch_id,
+            )
+
+            return True
+
+        except Exception:
+            logger.exception(
+                "[SILVER][MASSIVE][STOCK_OVERVIEW] "
+                "Processing failed | "
+                "datasource=%s | dataset=%s | batch_id=%s",
+                datasource,
+                dataset,
+                batch_id,
+            )
+            return False
+    
     # ========================================================
     # SILVER — FINNHUB TICKER REFERENCE
     # ========================================================
@@ -1321,16 +1411,18 @@ class StockPipeline:
 
         Pipeline flow:
 
-            Massive API
+            External APIs
                 ↓
-            Bronze
+            Bronze Layer
                 ↓
-            Silver
+            Silver Layer
                 ↓
-            Gold
+            Gold Layer
 
-        Also processes:
-            Finnhub API → Bronze → Silver
+        Data sources:
+            - Alpha Vantage
+            - Massive
+            - Finnhub
 
         Args:
             execution_start_time:
@@ -1341,15 +1433,17 @@ class StockPipeline:
 
             full_load:
                 Whether the pipeline should perform a full load.
+
+        Returns:
+            list[dict]:
+                Pipeline execution results.
         """
 
         batch_id = (
             f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
         )
 
-        pipeline_start_time = datetime.now(
-            timezone.utc
-        )
+        pipeline_start_time = datetime.now(timezone.utc)
 
         logger.info(
             "[PIPELINE] Starting ETL execution | "
@@ -1362,130 +1456,234 @@ class StockPipeline:
         )
 
         try:
-            logger.info(
-                "[PIPELINE][STEP 1/6] Massive API → Bronze | "
-                "batch_id=%s",
-                batch_id,
-            )
 
-            results_massive = (
-                self._ingest_from_massive_api(
-                    batch_id,
-                    execution_start_time,
-                    symbol="IBM",
+            # # ========================================================
+            # # STEP 1 — ALPHA VANTAGE → BRONZE
+            # # ========================================================
+
+            # logger.info(
+            #     "[PIPELINE][STEP 1/8] Alpha Vantage API → Bronze | "
+            #     "batch_id=%s",
+            #     batch_id,
+            # )
+
+            results_alphavantage = (
+                self._ingest_from_alphavantage_api(
+                    batch_id=batch_id,
+                    stock_symbols=stock_symbols,
+                    execution_start_time=execution_start_time,
                 )
             )
 
             logger.info(
-                "[PIPELINE][STEP 1/6] Massive API → Bronze completed."
+                "[PIPELINE][STEP 1/8] Alpha Vantage API → Bronze completed | "
+                "results=%s",
+                len(results_alphavantage),
             )
 
+            # ========================================================
+            # STEP 2 — MASSIVE → BRONZE
+            # ========================================================
+
             logger.info(
-                "[PIPELINE][STEP 2/6] Finnhub API → Bronze | "
+                "[PIPELINE][STEP 2/8] Massive API → Bronze | "
                 "batch_id=%s",
                 batch_id,
             )
 
-            results_finnhub = (
-                self._ingest_from_finnhub_api(
-                    batch_id,
-                    execution_start_time,
+            results_massive = []
+
+            for symbol in stock_symbols:
+                massive_result = (
+                    self._ingest_from_massive_api(
+                        batch_id=batch_id,
+                        execution_start_time=execution_start_time,
+                        symbol=symbol,
+                    )
                 )
-            )
+
+                results_massive.extend(massive_result)
 
             logger.info(
-                "[PIPELINE][STEP 2/6] Finnhub API → Bronze completed."
+                "[PIPELINE][STEP 2/8] Massive API → Bronze completed | "
+                "results=%s",
+                len(results_massive),
             )
+
+            # ========================================================
+            # STEP 3 — FINNHUB → BRONZE
+            # ========================================================
+
+            # logger.info(
+            #     "[PIPELINE][STEP 3/8] Finnhub API → Bronze | "
+            #     "batch_id=%s",
+            #     batch_id,
+            # )
+
+            # results_finnhub = (
+            #     self._ingest_from_finnhub_api(
+            #         batch_id=batch_id,
+            #         execution_start_time=execution_start_time,
+            #     )
+            # )
+
+            # logger.info(
+            #     "[PIPELINE][STEP 3/8] Finnhub API → Bronze completed | "
+            #     "results=%s",
+            #     len(results_finnhub),
+            # )
+
+            # # ========================================================
+            # # STEP 4 — ALPHA VANTAGE → SILVER
+            # # ========================================================
+
+            # logger.info(
+            #     "[PIPELINE][STEP 4/8] Alpha Vantage Bronze → Silver."
+            # )
+
+            # daily_processing = self._process_daily_dataset(
+            #     datasource="alphavantage",
+            #     execution_start_time=execution_start_time,
+            #     batch_id=batch_id,
+            # )
+
+            overview_processing = self._process_overview_dataset(
+                datasource="alphavantage",
+                execution_start_time=execution_start_time,
+                batch_id=batch_id,
+            )
+
+            # logger.info(
+            #     "[PIPELINE][STEP 4/8] Alpha Vantage Silver processing "
+            #     "completed | daily=%s | overview=%s",
+            #     daily_processing,
+            #     overview_processing,
+            # )
+
+            # ========================================================
+            # STEP 5 — MASSIVE → SILVER
+            # ========================================================
 
             logger.info(
-                "[PIPELINE][STEP 3/6] Bronze → Silver | Exchanges."
+                "[PIPELINE][STEP 5/8] Massive Bronze → Silver."
             )
 
-            massive_exchange_processing = (
-                self._process_massive_exchange_dataset(
+            # massive_exchange_processing = (
+            #     self._process_massive_exchange_dataset(
+            #         datasource="massive",
+            #         dataset="exchanges",
+            #         execution_start_time=execution_start_time,
+            #         batch_id=batch_id,
+            #     )
+            # )
+
+            stock_overview_processing = (
+                self._process_massive_stock_overview_dataset(
                     datasource="massive",
-                    dataset="exchanges",
+                    dataset="stock_overview",
                     execution_start_time=execution_start_time,
                     batch_id=batch_id,
                 )
             )
 
-            logger.info(
-                "[PIPELINE][STEP 3/6] Exchanges processing completed | "
-                "written=%s",
-                massive_exchange_processing,
-            )
+            # aggregates_processing = (
+            #     self._process_massive_dataset(
+            #         datasource="massive",
+            #         dataset="aggregates",
+            #         execution_start_time=execution_start_time,
+            #         batch_id=batch_id,
+            #     )
+            # )
+
+            # dividends_processing = (
+            #     self._process_massive_dataset(
+            #         datasource="massive",
+            #         dataset="dividends",
+            #         execution_start_time=execution_start_time,
+            #         batch_id=batch_id,
+            #     )
+            # )
 
             logger.info(
-                "[PIPELINE][STEP 4/6] Bronze → Silver | Stock Overview."
-            )
-
-            stock_overview_processing = (
-                self._process_massive_dataset(
-                    "massive",
-                    "stock_overview",
-                    execution_start_time,
-                    batch_id,
-                )
-            )
-
-            logger.info(
-                "[PIPELINE][STEP 4/6] Stock Overview processing completed | "
-                "written=%s",
+                "[PIPELINE][STEP 5/8] Massive Silver processing completed | "
+                "stock_overview=%s",
                 stock_overview_processing,
             )
 
-            logger.info(
-                "[PIPELINE][STEP 5/6] Bronze → Silver | "
-                "Aggregates + Dividends + Ticker Reference."
-            )
+            # ========================================================
+            # # STEP 6 — FINNHUB → SILVER
+            # # ========================================================
 
-            aggregates_processing = (
-                self._process_massive_dataset(
-                    "massive",
-                    "aggregates",
-                    execution_start_time,
-                    batch_id,
+            # logger.info(
+            #     "[PIPELINE][STEP 6/8] Finnhub Bronze → Silver."
+            # )
+
+            # stocks_list_processing = (
+            #     self._process_finnhub_dataset(
+            #         datasource="finnhub",
+            #         dataset="ticker_reference",
+            #         execution_start_time=execution_start_time,
+            #         batch_id=batch_id,
+            #     )
+            # )
+
+            # logger.info(
+            #     "[PIPELINE][STEP 6/8] Finnhub Silver processing completed | "
+            #     "ticker_reference=%s",
+            #     stocks_list_processing,
+            # )
+
+            # # ========================================================
+            # # STEP 7 — SILVER → GOLD
+            # # ========================================================
+            
+            stock_overview_csv = (
+                self.extractor.extract_silver_daily_data_csv(
+                    datasource="massive",
+                    dataset="stock_overview",
+                    data_format="csv",
+                    execution_start_time=execution_start_time,
+                )
+            )
+            
+            overview_csv = (
+                self.extractor.extract_silver_daily_data_csv(
+                    datasource="alphavantage",
+                    dataset="company_overview",
+                    data_format="csv",
+                    execution_start_time=execution_start_time,
                 )
             )
 
-            dividends_processing = (
-                self._process_massive_dataset(
-                    "massive",
-                    "dividends",
-                    execution_start_time,
-                    batch_id,
-                )
+            company_df = stock_overview_csv.join(
+                overview_csv,
+                on="symbol",
+                how="left"
             )
+            
+            _write_csv(
+                company_df,
+                "stock",
+                self.gold_base_path,
+                "company_dataset",
+                execution_start_time,
+            )
+            
+            # logger.info(
+            #     "[PIPELINE][STEP 7/8] Silver → Gold."
+            # )
 
-            stocks_list_processing = (
-                self._process_finnhub_dataset(
-                    "finnhub",
-                    "ticker_reference",
-                    execution_start_time,
-                    batch_id,
-                )
-            )
+            # self._build_gold_layer(
+            #     execution_start_time=execution_start_time,
+            # )
 
-            logger.info(
-                "[PIPELINE][STEP 5/6] Silver processing completed | "
-                "aggregates=%s | dividends=%s | ticker_reference=%s",
-                aggregates_processing,
-                dividends_processing,
-                stocks_list_processing,
-            )
+            # logger.info(
+            #     "[PIPELINE][STEP 7/8] Silver → Gold completed."
+            # )
 
-            logger.info(
-                "[PIPELINE][STEP 6/6] Silver → Gold."
-            )
-
-            self._build_gold_layer(
-                execution_start_time
-            )
-
-            logger.info(
-                "[PIPELINE][STEP 6/6] Gold processing completed."
-            )
+            # ========================================================
+            # STEP 8 — PIPELINE COMPLETION
+            # ========================================================
 
             pipeline_duration = (
                 datetime.now(timezone.utc)
@@ -1493,23 +1691,29 @@ class StockPipeline:
             ).total_seconds()
 
             logger.info(
-                "[PIPELINE] ETL execution completed successfully | "
-                "batch_id=%s | duration_seconds=%.2f | "
-                "silver_exchanges=%s | "
-                "silver_overview=%s | "
-                "silver_aggregates=%s | "
-                "silver_dividends=%s | "
-                "silver_ticker_reference=%s",
+                "[PIPELINE][STEP 8/8] ETL execution completed successfully | "
+                "batch_id=%s | duration_seconds=%.2f",
                 batch_id,
                 pipeline_duration,
-                massive_exchange_processing,
-                stock_overview_processing,
-                aggregates_processing,
-                dividends_processing,
-                stocks_list_processing,
             )
 
-            return "success"
+            return {
+                "status": "success",
+                "batch_id": batch_id,
+                "duration_seconds": pipeline_duration,
+                # "alphavantage": results_alphavantage,
+                "massive": results_massive,
+                # "finnhub": results_finnhub,
+                "silver": {
+                    # "daily": daily_processing,
+                    # "overview": overview_processing,
+                    # "exchanges": massive_exchange_processing,
+                    "stock_overview": stock_overview_processing,
+                    # "aggregates": aggregates_processing,
+                    # "dividends": dividends_processing,
+                    # "ticker_reference": stocks_list_processing,
+                },
+            }
 
         except Exception:
             pipeline_duration = (

@@ -147,9 +147,6 @@ def silver_transform_daily_timeseries(
     # STEP 1: START DAILY TIME SERIES TRANSFORMATION
     # ============================================================
 
-    print("\n" + "=" * 80)
-    print("STEP 1: DAILY TIME SERIES — BRONZE → SILVER")
-    print("=" * 80)
 
     logger.info(
         "[ALPHAVANTAGE][DAILY] Starting Bronze-to-Silver "
@@ -162,9 +159,6 @@ def silver_transform_daily_timeseries(
         # STEP 2: FLATTEN NESTED JSON STRUCTURE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 2: FLATTEN NESTED JSON STRUCTURE")
-        print("=" * 80)
 
         raw_df = data_df.select(
             col("`Meta Data`.`2. Symbol`").alias("symbol"),
@@ -181,9 +175,6 @@ def silver_transform_daily_timeseries(
         # STEP 3: SELECT + ALIAS OHLCV FIELDS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 3: SELECT + ALIAS OHLCV FIELDS")
-        print("=" * 80)
 
         stock_df = raw_df.select(
             col("symbol"),
@@ -205,9 +196,6 @@ def silver_transform_daily_timeseries(
         # STEP 4: TRIM WHITESPACE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 4: TRIM WHITESPACE")
-        print("=" * 80)
 
         string_columns = [
             "symbol",
@@ -233,9 +221,6 @@ def silver_transform_daily_timeseries(
         # STEP 5: NORMALIZE FAKE NULL VALUES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 5: NORMALIZE FAKE NULL VALUES")
-        print("=" * 80)
 
         fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
@@ -256,9 +241,6 @@ def silver_transform_daily_timeseries(
         # STEP 6: DATA TYPE CONVERSIONS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 6: DATA TYPE CONVERSIONS")
-        print("=" * 80)
 
         stock_df = (
             stock_df
@@ -279,9 +261,6 @@ def silver_transform_daily_timeseries(
         # STEP 7: VALIDATION STATUS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 7: APPLY DATA QUALITY VALIDATION")
-        print("=" * 80)
 
         stock_df = stock_df.withColumn(
             "validation_status",
@@ -310,9 +289,6 @@ def silver_transform_daily_timeseries(
         # STEP 8: VALIDATION REASON
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 8: GENERATE VALIDATION REASONS")
-        print("=" * 80)
 
         stock_df = stock_df.withColumn(
             "validation_reason",
@@ -341,9 +317,6 @@ def silver_transform_daily_timeseries(
         # STEP 9: FILTER VALID ROWS FOR SILVER LAYER
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 9: FILTER VALID ROWS FOR SILVER LAYER")
-        print("=" * 80)
 
         valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
@@ -359,9 +332,6 @@ def silver_transform_daily_timeseries(
         # STEP 10: DEDUPLICATE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 10: DEDUPLICATE DAILY TIME SERIES")
-        print("=" * 80)
 
         valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "day_date"])
 
@@ -374,9 +344,6 @@ def silver_transform_daily_timeseries(
         # STEP 11: ROUND FINANCIAL PRICES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 11: ROUND FINANCIAL PRICES")
-        print("=" * 80)
 
         valid_stock_df = (
             valid_stock_df
@@ -395,9 +362,6 @@ def silver_transform_daily_timeseries(
         # STEP 12: FINANCIAL METRIC ENRICHMENT
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 12: FINANCIAL METRIC ENRICHMENT")
-        print("=" * 80)
 
         valid_stock_df = (
             valid_stock_df
@@ -428,9 +392,6 @@ def silver_transform_daily_timeseries(
         # STEP 13: ROLLING 30-DAY AVERAGE OPEN & CLOSE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 13: ROLLING 30-DAY AVERAGE OPEN & CLOSE")
-        print("=" * 80)
 
         recent_stock_df = valid_stock_df.filter(
             col("day_date") >= date_sub(current_date(), 30)
@@ -453,9 +414,6 @@ def silver_transform_daily_timeseries(
         # STEP 14: ROLLING 52-WEEK HIGH & LOW
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 14: ROLLING 52-WEEK HIGH & LOW")
-        print("=" * 80)
 
         fifty_two_week_df = valid_stock_df.filter(
             col("day_date") >= date_sub(current_date(), 365)
@@ -478,9 +436,6 @@ def silver_transform_daily_timeseries(
         # STEP 15: ALL-TIME HIGH & LOW
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 15: ALL-TIME HIGH & LOW")
-        print("=" * 80)
 
         all_time_agg = valid_stock_df.groupBy("symbol").agg(
             F.round(F.max("high"), 2).alias("all_time_high"),
@@ -499,9 +454,6 @@ def silver_transform_daily_timeseries(
         # STEP 16: PARTITION KEYS & LAG FEATURES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 16: PARTITION KEYS & LAG FEATURES")
-        print("=" * 80)
 
         valid_stock_df = (
             valid_stock_df
@@ -545,9 +497,6 @@ def silver_transform_daily_timeseries(
         # STEP 17: FINAL SILVER SCHEMA SELECTION & SORTING
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 17: FINAL SILVER SCHEMA SELECTION & SORTING")
-        print("=" * 80)
 
         valid_stock_df = valid_stock_df.select(
             "symbol",
@@ -600,17 +549,6 @@ def silver_transform_daily_timeseries(
         # STEP 18: ROW COUNT METRICS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 18: DAILY TIME SERIES ROW COUNT METRICS")
-        print("=" * 80)
-
-        total_in = data_df.count()
-        total_out = valid_stock_df.count()
-
-        valid_count = valid_stock_df.filter(
-            col("validation_status") == "VALID"
-        ).count()
-
         logger.info(
             "[ALPHAVANTAGE][DAILY][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",
@@ -620,18 +558,10 @@ def silver_transform_daily_timeseries(
             invalid_record_count,
         )
 
-        print(f"Total In      : {total_in}")
-        print(f"Total Out     : {total_out}")
-        print(f"Valid Records : {valid_count}")
-        print(f"Invalid       : {invalid_record_count}")
-
         # ========================================================
         # STEP 19: RETURN SILVER DATAFRAME
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 19: DAILY TIME SERIES TRANSFORMATION COMPLETED")
-        print("=" * 80)
 
         logger.info(
             "[ALPHAVANTAGE][DAILY] Bronze-to-Silver transformation "
@@ -641,10 +571,6 @@ def silver_transform_daily_timeseries(
         return valid_stock_df
 
     except Exception as e:
-
-        print("\n" + "!" * 80)
-        print("DAILY TIME SERIES TRANSFORMATION FAILED")
-        print("!" * 80)
 
         logger.exception(
             "[ALPHAVANTAGE][DAILY] Error transforming daily "

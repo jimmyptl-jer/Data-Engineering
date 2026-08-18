@@ -95,9 +95,6 @@ def transform_finnhub_stock_tickers_dataset(
     # STEP 1: START FINNHUB STOCK TICKER TRANSFORMATION
     # ============================================================
 
-    print("\n" + "=" * 80)
-    print("STEP 1: FINNHUB STOCK TICKERS — BRONZE → SILVER")
-    print("=" * 80)
 
     logger.info(
         "[FINNHUB][STOCK_TICKERS] Starting Bronze-to-Silver "
@@ -110,9 +107,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 2: VALIDATE EXPECTED SOURCE COLUMNS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 2: VALIDATE FINNHUB BRONZE SCHEMA")
-        print("=" * 80)
 
         expected_columns = [
             "currency",
@@ -149,9 +143,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 3: SELECT + CAST
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 3: SELECT + CAST FINNHUB STOCK TICKER DATA")
-        print("=" * 80)
 
         ticker_df = data_df.select(
             col("currency").cast(StringType()).alias("currency"),
@@ -176,9 +167,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 4: TRIM WHITESPACE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 4: TRIM WHITESPACE")
-        print("=" * 80)
 
         dataset_cols = ticker_df.columns
 
@@ -196,9 +184,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 5: NORMALIZE FAKE NULL VALUES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 5: NORMALIZE FAKE NULL VALUES")
-        print("=" * 80)
 
         fake_null_values = [
             "",
@@ -227,9 +212,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 6: DEDUPLICATE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 6: DEDUPLICATE FINNHUB STOCK TICKERS")
-        print("=" * 80)
 
         ticker_df = ticker_df.dropDuplicates(
             ["symbol", "mic"]
@@ -244,9 +226,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 7: STANDARDIZE CASING
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 7: STANDARDIZE FINNHUB STOCK TICKER CASING")
-        print("=" * 80)
 
         ticker_df = (
             ticker_df
@@ -304,9 +283,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 8: VALIDATION STATUS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 8: APPLY FINNHUB STOCK TICKER VALIDATION")
-        print("=" * 80)
 
         ticker_df = ticker_df.withColumn(
             "validation_status",
@@ -338,9 +314,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 9: VALIDATION REASON
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 9: GENERATE VALIDATION REASONS")
-        print("=" * 80)
 
         ticker_df = ticker_df.withColumn(
             "validation_reason",
@@ -377,9 +350,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 10: RENAME TO SILVER NAMING CONVENTION
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 10: RENAME COLUMNS TO SILVER SNAKE_CASE")
-        print("=" * 80)
 
         ticker_df = (
             ticker_df
@@ -407,21 +377,6 @@ def transform_finnhub_stock_tickers_dataset(
         # STEP 11: ROW COUNT METRICS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 11: FINNHUB STOCK TICKER ROW COUNT METRICS")
-        print("=" * 80)
-
-        total_in = data_df.count()
-        total_out = ticker_df.count()
-
-        valid_count = ticker_df.filter(
-            col("validation_status") == "VALID"
-        ).count()
-
-        invalid_count = ticker_df.filter(
-            col("validation_status") == "INVALID"
-        ).count()
-
         logger.info(
             "[FINNHUB][STOCK_TICKERS][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",
@@ -431,18 +386,10 @@ def transform_finnhub_stock_tickers_dataset(
             invalid_count,
         )
 
-        print(f"Total In      : {total_in}")
-        print(f"Total Out     : {total_out}")
-        print(f"Valid Records : {valid_count}")
-        print(f"Invalid       : {invalid_count}")
-
         # ========================================================
         # STEP 12: RETURN SILVER DATAFRAME
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 12: FINNHUB STOCK TICKER TRANSFORMATION COMPLETED")
-        print("=" * 80)
 
         logger.info(
             "[FINNHUB][STOCK_TICKERS] Bronze-to-Silver transformation "
@@ -452,10 +399,6 @@ def transform_finnhub_stock_tickers_dataset(
         return ticker_df
 
     except Exception:
-
-        print("\n" + "!" * 80)
-        print("FINNHUB STOCK TICKER TRANSFORMATION FAILED")
-        print("!" * 80)
 
         logger.exception(
             "[FINNHUB][STOCK_TICKERS] Error processing "

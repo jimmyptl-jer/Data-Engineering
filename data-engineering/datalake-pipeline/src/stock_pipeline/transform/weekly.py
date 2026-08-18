@@ -125,9 +125,6 @@ def transform_weekly_timeseries(
     # STEP 1: START WEEKLY TIME SERIES TRANSFORMATION
     # ============================================================
 
-    print("\n" + "=" * 80)
-    print("STEP 1: WEEKLY TIME SERIES — BRONZE → SILVER")
-    print("=" * 80)
 
     logger.info(
         "[ALPHAVANTAGE][WEEKLY] Starting Bronze-to-Silver "
@@ -140,9 +137,6 @@ def transform_weekly_timeseries(
         # STEP 2: FLATTEN JSON MAP
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 2: FLATTEN JSON MAP")
-        print("=" * 80)
 
         raw_df = data_df.select(
             col("`Meta Data`.`2. Symbol`").alias("symbol"),
@@ -159,9 +153,6 @@ def transform_weekly_timeseries(
         # STEP 3: SELECT + ALIAS OHLCV FIELDS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 3: SELECT + ALIAS OHLCV FIELDS")
-        print("=" * 80)
 
         stock_df = raw_df.select(
             col("symbol"),
@@ -182,9 +173,6 @@ def transform_weekly_timeseries(
         # STEP 4: TRIM WHITESPACE & UPPERCASE SYMBOL
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 4: TRIM WHITESPACE & UPPERCASE SYMBOL")
-        print("=" * 80)
 
         string_columns = [
             "symbol",
@@ -210,9 +198,6 @@ def transform_weekly_timeseries(
         # STEP 5: NORMALIZE FAKE NULL VALUES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 5: NORMALIZE FAKE NULL VALUES")
-        print("=" * 80)
 
         fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
@@ -233,9 +218,6 @@ def transform_weekly_timeseries(
         # STEP 6: DATA TYPE CONVERSIONS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 6: EXPLICIT DATA TYPE CASTING")
-        print("=" * 80)
 
         stock_df = (
             stock_df
@@ -256,9 +238,6 @@ def transform_weekly_timeseries(
         # STEP 7: VALIDATION STATUS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 7: APPLY DATA QUALITY VALIDATION")
-        print("=" * 80)
 
         stock_df = stock_df.withColumn(
             "validation_status",
@@ -287,9 +266,6 @@ def transform_weekly_timeseries(
         # STEP 8: VALIDATION REASON
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 8: GENERATE VALIDATION REASONS")
-        print("=" * 80)
 
         stock_df = stock_df.withColumn(
             "validation_reason",
@@ -318,9 +294,6 @@ def transform_weekly_timeseries(
         # STEP 9: FILTER VALID ROWS FOR SILVER LAYER
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 9: FILTER VALID ROWS FOR SILVER LAYER")
-        print("=" * 80)
 
         valid_stock_df = stock_df.filter(col("validation_status") == "VALID")
 
@@ -336,9 +309,6 @@ def transform_weekly_timeseries(
         # STEP 10: DEDUPLICATE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 10: DEDUPLICATE WEEKLY TIME SERIES")
-        print("=" * 80)
 
         valid_stock_df = valid_stock_df.dropDuplicates(["symbol", "week_date"])
 
@@ -351,9 +321,6 @@ def transform_weekly_timeseries(
         # STEP 11: ROUND NUMERIC PRICES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 11: ROUND NUMERIC PRICES")
-        print("=" * 80)
 
         valid_stock_df = (
             valid_stock_df
@@ -372,9 +339,6 @@ def transform_weekly_timeseries(
         # STEP 12: METRIC ENRICHMENT & PARTITION METADATA
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 12: METRIC ENRICHMENT & PARTITION METADATA")
-        print("=" * 80)
 
         valid_stock_df = (
             valid_stock_df
@@ -405,9 +369,6 @@ def transform_weekly_timeseries(
         # STEP 13: FINAL SELECTION & ORDERING
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 13: FINAL SELECTION & ORDERING")
-        print("=" * 80)
 
         valid_stock_df = valid_stock_df.select(
             "symbol",
@@ -450,17 +411,6 @@ def transform_weekly_timeseries(
         # STEP 14: ROW COUNT METRICS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 14: WEEKLY TIME SERIES ROW COUNT METRICS")
-        print("=" * 80)
-
-        total_in = data_df.count()
-        total_out = valid_stock_df.count()
-
-        valid_count = valid_stock_df.filter(
-            col("validation_status") == "VALID"
-        ).count()
-
         logger.info(
             "[ALPHAVANTAGE][WEEKLY][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",
@@ -470,18 +420,10 @@ def transform_weekly_timeseries(
             invalid_record_count,
         )
 
-        print(f"Total In      : {total_in}")
-        print(f"Total Out     : {total_out}")
-        print(f"Valid Records : {valid_count}")
-        print(f"Invalid       : {invalid_record_count}")
-
         # ========================================================
         # STEP 15: RETURN SILVER DATAFRAME
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 15: WEEKLY TIME SERIES TRANSFORMATION COMPLETED")
-        print("=" * 80)
 
         logger.info(
             "[ALPHAVANTAGE][WEEKLY] Bronze-to-Silver transformation "
@@ -491,10 +433,6 @@ def transform_weekly_timeseries(
         return valid_stock_df
 
     except Exception as e:
-
-        print("\n" + "!" * 80)
-        print("WEEKLY TIME SERIES TRANSFORMATION FAILED")
-        print("!" * 80)
 
         logger.exception(
             "[ALPHAVANTAGE][WEEKLY] Error transforming weekly "

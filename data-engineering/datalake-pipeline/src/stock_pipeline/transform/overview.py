@@ -232,9 +232,6 @@ def silver_transform_overview(
     # STEP 1: START COMPANY OVERVIEW TRANSFORMATION
     # ============================================================
 
-    print("\n" + "=" * 80)
-    print("STEP 1: COMPANY OVERVIEW — BRONZE → SILVER")
-    print("=" * 80)
 
     logger.info(
         "[ALPHAVANTAGE][OVERVIEW] Starting Bronze-to-Silver "
@@ -247,9 +244,6 @@ def silver_transform_overview(
         # STEP 2: SELECT 52 BUSINESS COLUMNS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 2: SELECT 52 BUSINESS COLUMNS")
-        print("=" * 80)
 
         data_df = data_df.select(*OVERVIEW_BUSINESS_COLUMNS)
 
@@ -261,9 +255,6 @@ def silver_transform_overview(
         # STEP 3: RENAME TO SNAKE_CASE
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 3: RENAME COLUMNS TO SNAKE_CASE")
-        print("=" * 80)
 
         for old_name, new_name in OVERVIEW_COLUMN_MAPPING.items():
             if old_name in data_df.columns:
@@ -278,9 +269,6 @@ def silver_transform_overview(
         # STEP 4: TRIM WHITESPACE & STANDARDIZE CASING
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 4: TRIM WHITESPACE & STANDARDIZE CASING")
-        print("=" * 80)
 
         string_columns = [
             "symbol",
@@ -330,9 +318,6 @@ def silver_transform_overview(
         # STEP 5: NORMALIZE FAKE NULL VALUES
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 5: NORMALIZE FAKE NULL VALUES")
-        print("=" * 80)
 
         fake_null_values = ["", "n/a", "na", "null", "none", "-"]
 
@@ -353,9 +338,6 @@ def silver_transform_overview(
         # STEP 6: DEFAULT VALUE IMPUTATION
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 6: DEFAULT VALUE IMPUTATION")
-        print("=" * 80)
 
         data_df = data_df.fillna({
             "country": "Unknown",
@@ -372,9 +354,6 @@ def silver_transform_overview(
         # STEP 7: DATA TYPE CASTING
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 7: EXPLICIT DATA TYPE CASTING")
-        print("=" * 80)
 
         integer_columns = [
             "cik", "analyst_rating_strong_buy", "analyst_rating_buy",
@@ -428,9 +407,6 @@ def silver_transform_overview(
         # STEP 8: PARTITION KEYS & PROCESSING TIMESTAMP
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 8: PARTITION KEYS & PROCESSING TIMESTAMP")
-        print("=" * 80)
 
         data_df = (
             data_df
@@ -453,10 +429,6 @@ def silver_transform_overview(
         # STEP 9: ROW COUNT METRICS
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 9: COMPANY OVERVIEW ROW COUNT METRICS")
-        print("=" * 80)
-
         total_out = data_df.count()
 
         logger.info(
@@ -465,15 +437,10 @@ def silver_transform_overview(
             total_out,
         )
 
-        print(f"Total Out     : {total_out}")
-
         # ========================================================
         # STEP 10: RETURN SILVER DATAFRAME
         # ========================================================
 
-        print("\n" + "=" * 80)
-        print("STEP 10: COMPANY OVERVIEW TRANSFORMATION COMPLETED")
-        print("=" * 80)
 
         logger.info(
             "[ALPHAVANTAGE][OVERVIEW] Bronze-to-Silver transformation "
@@ -483,10 +450,6 @@ def silver_transform_overview(
         return data_df
 
     except Exception as e:
-
-        print("\n" + "!" * 80)
-        print("COMPANY OVERVIEW TRANSFORMATION FAILED")
-        print("!" * 80)
 
         logger.exception(
             "[ALPHAVANTAGE][OVERVIEW] Error transforming overview "

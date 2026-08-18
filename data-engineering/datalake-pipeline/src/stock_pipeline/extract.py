@@ -194,7 +194,8 @@ class StockDataExtractor:
         )
 
     def _silver_bucket_key(
-        self, 
+        self,
+        datasource:str, 
         dataset: str, 
         data_format: str, 
         execution_start_time: datetime,
@@ -213,13 +214,10 @@ class StockDataExtractor:
         return (
             f"s3a://{self.bucket_name}/"
             f"stock/silver/"
-            f"source=alphavantage/"
+            f"datasource={datasource}/"
             f"dataset={dataset}/"
             f"year={execution_start_time.year}/"
             f"month={execution_start_time.month:02d}/"
-            f"day={execution_start_time.day:02d}/"
-            f"hour={execution_start_time.hour:02d}/"
-            f"minute={execution_start_time.minute:02d}/"
             f"format={data_format}/"
         )
 
@@ -411,7 +409,11 @@ class StockDataExtractor:
             raise
 
     def extract_silver_daily_data_csv(
-        self, dataset: str, data_format: str, execution_start_time: datetime,
+        self,
+        datasource:str,
+        dataset: str, 
+        data_format: str, 
+        execution_start_time: datetime,
     ) -> DataFrame:
         """
         Extract processed daily time-series CSV files from Silver S3 layer.
@@ -424,7 +426,7 @@ class StockDataExtractor:
         Returns:
             DataFrame: Spark DataFrame loaded from CSV.
         """
-        bucket_key = self._silver_bucket_key(dataset, data_format, execution_start_time)
+        bucket_key = self._silver_bucket_key(datasource,dataset, data_format, execution_start_time)
         logger.info("[EXTRACT][SILVER_DAILY_CSV] Reading CSV files from: %s", bucket_key)
 
         if not self._path_exists(bucket_key):
@@ -578,7 +580,7 @@ class MassiveApiExtractor:
 
         if not self._path_exists(bucket_key):
             logger.warning(
-                "[EXTRACT_MASSIVE_DATASET] "
+                "[EXTRACT][MASSIVE_BRONZE] "
                 "S3 partition path does not exist: %s",
                 bucket_key,
             )
@@ -588,7 +590,7 @@ class MassiveApiExtractor:
 
         try:
             logger.info(
-                "[EXTRACT_MASSIVE_DATASET] Reading Bronze data: %s",
+                "[EXTRACT][MASSIVE_BRONZE] Reading Bronze data: %s",
                 bucket_key,
             )
 
@@ -600,24 +602,15 @@ class MassiveApiExtractor:
             )
 
             logger.info(
-                "[EXTRACT_MASSIVE_DATASET] Schema for dataset=%s",
+                "[EXTRACT][MASSIVE_BRONZE] Schema for dataset=%s",
                 dataset,
             )
-
-            df.printSchema()
-
-            logger.info(
-                "[EXTRACT_MASSIVE_DATASET] Sample data for dataset=%s",
-                dataset,
-            )
-
-            df.show(5, truncate=False)
 
             return df
 
         except Exception:
             logger.exception(
-                "[EXTRACT_MASSIVE_DATASET] Failed to read dataset=%s",
+                "[EXTRACT][MASSIVE_BRONZE] Failed to read dataset=%s",
                 dataset,
             )
             raise
