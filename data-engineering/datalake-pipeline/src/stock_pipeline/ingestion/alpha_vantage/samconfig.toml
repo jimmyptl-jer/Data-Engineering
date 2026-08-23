@@ -1,0 +1,26 @@
+version = 0.1
+
+# ============================================================
+# Alpha Vantage Ingestion Lambda — SAM Deploy Config
+#
+# Deploy:   cd src/stock_pipeline/ingestion/alpha_vantage
+#           sam build && sam deploy
+#
+# Local:    sam local invoke AlphaVantageIngestFunction \
+#             -e events/test_event.json \
+#             --env-vars env.json
+# ============================================================
+
+[default.deploy.parameters]
+stack_name        = "ingest-alpha-vantage"
+resolve_s3        = true
+s3_prefix         = "ingest-alpha-vantage"
+region            = "us-east-1"
+confirm_changeset = true
+capabilities      = "CAPABILITY_IAM"
+disable_rollback  = true
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" StockSymbols=\"IBM\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Alpha Vantage Ingestion Lambda
+  Fetches Daily Time-Series and Company Overview from the Alpha Vantage API
+  and lands raw JSON payloads into the S3 Bronze layer.
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 512
+    Runtime: python3.14
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Development
+      - QA
+      - UAT
+      - Production
+
+  S3BucketName:
+    Type: String
+    Default: graywolf--data--lake
+    Description: Target S3 data lake bucket (must already exist)
+
+  StockSymbols:
+    Type: String
+    Default: "IBM"
+    Description: Comma-separated stock symbols to ingest
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 14 ? * MON-FRI *)"
+    Description: EventBridge schedule expression for automatic runs
+
+  EnableSchedule:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  AlphaVantageApiKey:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey1:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey2:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey3:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey4:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey5:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey6:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey7:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey8:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey9:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey10:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey11:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey12:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey13:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey14:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey15:
+    Type: String
+    NoEcho: true
+
+# ============================================================
+# CONDITIONS
+# ============================================================
+
+Conditions:
+  IsScheduleEnabled: !Equals [!Ref EnableSchedule, "true"]
+
+# ============================================================
+# RESOURCES
+# ============================================================
+
+Resources:
+
+  AlphaVantageIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ingest-alpha-vantage-${EnvironmentName}"
+      Handler: src.stock_pipeline.ingestion.alpha_vantage.app.lambda_handler
+      # CodeUri points to the project root so the full src package is included
+      CodeUri: ../../../../
+      Description: Ingests Alpha Vantage Daily Time-Series and Company Overview → S3 Bronze
+      Architectures:
+        - x86_64
+      Tags:
+        Project: AlphaVantage-DataLake
+        Environment: !Ref EnvironmentName
+        Owner: Jimmy Patel
+        ManagedBy: AWS SAM
+        Layer: Ingestion
+        Source: AlphaVantage
+      Environment:
+        Variables:
+          ALPHA_VANTAGE_API_KEY: !Ref AlphaVantageApiKey
+          ALPHA_VANTAGE_API_KEY_1: !Ref AlphaVantageApiKey1
+          ALPHA_VANTAGE_API_KEY_2: !Ref AlphaVantageApiKey2
+          ALPHA_VANTAGE_API_KEY_3: !Ref AlphaVantageApiKey3
+          ALPHA_VANTAGE_API_KEY_4: !Ref AlphaVantageApiKey4
+          ALPHA_VANTAGE_API_KEY_5: !Ref AlphaVantageApiKey5
+          ALPHA_VANTAGE_API_KEY_6: !Ref AlphaVantageApiKey6
+          ALPHA_VANTAGE_API_KEY_7: !Ref AlphaVantageApiKey7
+          ALPHA_VANTAGE_API_KEY_8: !Ref AlphaVantageApiKey8
+          ALPHA_VANTAGE_API_KEY_9: !Ref AlphaVantageApiKey9
+          ALPHA_VANTAGE_API_KEY_10: !Ref AlphaVantageApiKey10
+          ALPHA_VANTAGE_API_KEY_11: !Ref AlphaVantageApiKey11
+          ALPHA_VANTAGE_API_KEY_12: !Ref AlphaVantageApiKey12
+          ALPHA_VANTAGE_API_KEY_13: !Ref AlphaVantageApiKey13
+          ALPHA_VANTAGE_API_KEY_14: !Ref AlphaVantageApiKey14
+          ALPHA_VANTAGE_API_KEY_15: !Ref AlphaVantageApiKey15
+          S3_BUCKET_NAME: !Ref S3BucketName
+      Policies:
+        - Statement:
+            - Sid: S3BronzeWriteAccess
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:ListBucket
+              Resource:
+                - !Sub "arn:aws:s3:::${S3BucketName}"
+                - !Sub "arn:aws:s3:::${S3BucketName}/*"
+      Events:
+        ScheduledRun:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: Scheduled Alpha Vantage ingestion run
+            Enabled: !If [IsScheduleEnabled, true, false]
+            Input: !Sub '{"stock_symbols": ["${StockSymbols}"]}'
+
+  AlphaVantageIngestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AlphaVantageIngestFunction}"
+      RetentionInDays: 30
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+
+Outputs:
+  FunctionName:
+    Description: Alpha Vantage ingestion Lambda function name
+    Value: !Ref AlphaVantageIngestFunction
+
+  FunctionArn:
+    Description: Alpha Vantage ingestion Lambda function ARN
+    Value: !GetAtt AlphaVantageIngestFunction.Arn
+
+  LogGroupName:
+    Description: CloudWatch log group name
+    Value: !Ref AlphaVantageIngestLogGroup

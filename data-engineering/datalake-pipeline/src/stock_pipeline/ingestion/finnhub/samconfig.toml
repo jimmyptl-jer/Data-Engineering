@@ -1,0 +1,26 @@
+version = 0.1
+
+# ============================================================
+# Finnhub Ingestion Lambda — SAM Deploy Config
+#
+# Deploy:   cd src/stock_pipeline/ingestion/finnhub
+#           sam build && sam deploy
+#
+# Local:    sam local invoke FinnhubIngestFunction \
+#             -e events/test_event.json \
+#             --env-vars env.json
+# ============================================================
+
+[default.deploy.parameters]
+stack_name        = "ingest-finnhub"
+resolve_s3        = true
+s3_prefix         = "ingest-finnhub"
+region            = "us-east-1"
+confirm_changeset = true
+capabilities      = "CAPABILITY_IAM"
+disable_rollback  = true
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" Exchange=\"US\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\" FinnhubApiKey=\"REPLACE_ME\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

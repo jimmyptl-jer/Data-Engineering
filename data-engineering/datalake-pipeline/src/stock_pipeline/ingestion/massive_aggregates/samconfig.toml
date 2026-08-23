@@ -1,0 +1,26 @@
+version = 0.1
+
+# ============================================================
+# Massive Aggregates Ingestion Lambda — SAM Deploy Config
+#
+# Deploy:   cd src/stock_pipeline/ingestion/massive_aggregates
+#           sam build && sam deploy
+#
+# Local:    sam local invoke MassiveAggregatesIngestFunction \
+#             -e events/test_event.json \
+#             --env-vars env.json
+# ============================================================
+
+[default.deploy.parameters]
+stack_name        = "ingest-massive-aggregates"
+resolve_s3        = true
+s3_prefix         = "ingest-massive-aggregates"
+region            = "us-east-1"
+confirm_changeset = true
+capabilities      = "CAPABILITY_IAM"
+disable_rollback  = true
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" StockSymbols=\"IBM\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\" MassiveApiKey=\"REPLACE_ME\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"
