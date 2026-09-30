@@ -15,7 +15,6 @@ version = 0.1
 stack_name        = "ingest-alpha-vantage"
 resolve_s3        = true
 s3_prefix         = "ingest-alpha-vantage"
-region            = "us-east-1"
 confirm_changeset = true
 capabilities      = "CAPABILITY_IAM"
 disable_rollback  = true

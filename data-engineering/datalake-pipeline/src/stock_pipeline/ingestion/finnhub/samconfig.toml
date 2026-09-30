@@ -12,14 +12,13 @@ version = 0.1
 # ============================================================
 
 [default.deploy.parameters]
-stack_name        = "ingest-finnhub"
+stack_name        = "finnhub-ingestion"
 resolve_s3        = true
-s3_prefix         = "ingest-finnhub"
-region            = "us-east-1"
+s3_prefix         = "finnhub-ingestion"
 confirm_changeset = true
 capabilities      = "CAPABILITY_IAM"
 disable_rollback  = true
-parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" Exchange=\"US\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\" FinnhubApiKey=\"REPLACE_ME\""
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" Exchange=\"US\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\""
 image_repositories = []
 
 [default.global.parameters]

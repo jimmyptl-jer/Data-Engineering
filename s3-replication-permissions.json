@@ -1,0 +1,36 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SourceBucketPermissions",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObjectVersionForReplication",
+        "s3:GetObjectVersionAcl",
+        "s3:GetObjectVersionTagging"
+      ],
+      "Resource": "arn:aws:s3:::graywolf--data--lake/*"
+    },
+    {
+      "Sid": "SourceBucketListPermission",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::graywolf--data--lake"
+    },
+    {
+      "Sid": "DestinationBucketPermissions",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ReplicateObject",
+        "s3:ReplicateDelete",
+        "s3:ReplicateTags"
+      ],
+      "Resource": [
+        "arn:aws:s3:::graywolf-data-lake-mumbai-region/*",
+        "arn:aws:s3:::graywolf-data-lake-london-region/*"
+      ]
+    }
+  ]
+}

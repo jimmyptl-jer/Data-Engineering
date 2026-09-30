@@ -15,11 +15,10 @@ version = 0.1
 stack_name        = "ingest-massive-exchanges"
 resolve_s3        = true
 s3_prefix         = "ingest-massive-exchanges"
-region            = "us-east-1"
 confirm_changeset = true
 capabilities      = "CAPABILITY_IAM"
 disable_rollback  = true
-parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\" MassiveApiKey=\"REPLACE_ME\""
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" EnableSchedule=\"true\""
 image_repositories = []
 
 [default.global.parameters]
