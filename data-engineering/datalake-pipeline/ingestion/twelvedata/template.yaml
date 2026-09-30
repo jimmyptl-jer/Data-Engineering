@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Alpha Vantage Ingestion Lambda.
+  Fetches Daily Time-Series and Company Overview data
+  and lands raw JSON payloads into the S3 Bronze layer.
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 512
+    Runtime: python3.14
+
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Development
+      - QA
+      - UAT
+      - Production
+
+  S3BucketName:
+    Type: String
+    Default: graywolf--data--lake
+    Description: Target S3 data lake bucket
+
+  StockSymbols:
+    Type: String
+    Default: "IBM"
+    Description: Comma-separated stock symbols to ingest
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 14 ? * MON-FRI *)"
+    Description: EventBridge schedule expression
+
+  EnableSchedule:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+# ============================================================
+# CONDITIONS
+# ============================================================
+
+Conditions:
+  IsScheduleEnabled: !Equals
+    - !Ref EnableSchedule
+    - "true"
+
+# ============================================================
+# RESOURCES
+# ============================================================
+
+Resources:
+  AlphaVantageIngestFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: !Sub "ingest-alpha-vantage-${EnvironmentName}"
+
+      Handler: app.lambda_handler
+
+      CodeUri: .
+
+      Description: Ingests Alpha Vantage data into S3 Bronze
+
+      Architectures:
+        - x86_64
+
+      Tags:
+        Project: AlphaVantage-DataLake
+        Environment: !Ref EnvironmentName
+        ManagedBy: AWS SAM
+        Layer: Ingestion
+        Source: AlphaVantage
+
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref S3BucketName
+
+      Policies:
+        - Statement:
+            - Sid: S3BronzeWriteAccess
+
+              Effect: Allow
+
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:ListBucket
+
+              Resource:
+                - !Sub "arn:aws:s3:::${S3BucketName}"
+                - !Sub "arn:aws:s3:::${S3BucketName}/*"
+
+      Events:
+        ScheduledRun:
+          Type: Schedule
+
+          Properties:
+            Schedule: !Ref ScheduleExpression
+
+            Description: Scheduled Alpha Vantage ingestion run
+
+            Enabled: !If
+              - IsScheduleEnabled
+              - true
+              - false
+
+            Input: !Sub |
+              {
+                "stock_symbols": ["${StockSymbols}"]
+              }
+
+  # ============================================================
+  # CLOUDWATCH LOG GROUP
+  # ============================================================
+
+  AlphaVantageIngestLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AlphaVantageIngestFunction}"
+
+      RetentionInDays: 30
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+
+Outputs:
+  FunctionName:
+    Description: Alpha Vantage ingestion Lambda function name
+    Value: !Ref AlphaVantageIngestFunction
+
+  FunctionArn:
+    Description: Alpha Vantage ingestion Lambda function ARN
+    Value: !GetAtt AlphaVantageIngestFunction.Arn
+
+  LogGroupName:
+    Description: CloudWatch log group name
+    Value: !Ref AlphaVantageIngestLogGroup
