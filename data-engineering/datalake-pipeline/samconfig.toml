@@ -8,7 +8,7 @@ region = "us-east-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
 disable_rollback = true
-parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" StockSymbols=\"IBM\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\""
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"true\""
 image_repositories = []
 
 [default.global.parameters]

@@ -4,15 +4,13 @@ Extract Stage Module — Reads raw Bronze data and intermediate Silver data from
 Key Responsibilities:
   1. Explicit Schema Enforcement: Defines explicit `StructType` Spark schemas for Bronze JSON datasets
      (Weekly Time Series, Daily Time Series, Company Overview) to ensure type safety and avoid runtime schema inference overhead.
-  2. REST API Extraction: Executes GET requests to the Alpha Vantage API endpoints with error/timeout handling.
-  3. S3 Partition Path Generation: Constructs S3 bucket keys for Bronze (raw JSON) and Silver (Parquet/CSV) storage formats.
-  4. Layer Data Extraction: Reads JSON, Parquet, and CSV files from S3 using PySpark Dataframe Readers.
+  2. S3 Partition Path Generation: Constructs S3 bucket keys for Bronze (raw JSON) and Silver (Parquet/CSV) storage formats.
+  3. Layer Data Extraction: Reads JSON, Parquet, and CSV files from S3 using PySpark Dataframe Readers.
 """
 
 import logging
 from datetime import datetime
 
-import requests
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import (
     MapType,
@@ -24,9 +22,6 @@ from pyspark.sql.types import (
 from . import config
 
 logger = logging.getLogger(__name__)
-
-# Base REST API URL for Alpha Vantage queries
-ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 
 
 # ============================================================
@@ -124,7 +119,7 @@ stock_overview_schema = StructType([
 
 class StockDataExtractor:
     """
-    Handles extraction operations across REST API, Bronze S3, and Silver S3 storage tiers.
+    Handles extraction operations across the Bronze S3 and Silver S3 storage tiers.
     """
 
     def __init__(self, spark: SparkSession):
@@ -220,73 +215,6 @@ class StockDataExtractor:
             f"month={execution_start_time.month:02d}/"
             f"format={data_format}/"
         )
-
-    # ============================================================
-    # REST API CALLS
-    # ============================================================
-
-    def fetch_alpha_vantage_api_data(self, params: dict = None) -> dict:
-        """
-        Execute HTTP GET request against the Alpha Vantage REST API.
-
-        Args:
-            params: Dictionary containing query parameters ('function', 'symbol', 'apikey').
-
-        Returns:
-            dict: Decoded JSON response payload from Alpha Vantage.
-        """
-        symbol = params.get("symbol") if params else None
-        function = params.get("function") if params else None
-
-        logger.info(
-            "[EXTRACT][API_CALL] Executing HTTP GET to Alpha Vantage: symbol=%s, function=%s",
-            symbol,
-            function,
-        )
-
-        try:
-            response = requests.get(
-                ALPHA_VANTAGE_BASE_URL,
-                params=params,
-                timeout=10,
-            )
-
-            logger.info(
-                "[EXTRACT][API_RESPONSE] Received response: symbol=%s, HTTP Status=%s",
-                symbol,
-                response.status_code,
-            )
-
-            response.raise_for_status()
-            response_data = response.json()
-
-            logger.debug(
-                "[EXTRACT][API_KEYS] Top-level keys returned for symbol=%s: %s",
-                symbol,
-                list(response_data.keys()),
-            )
-
-            return response_data
-
-        except requests.exceptions.HTTPError as e:
-            logger.exception("[EXTRACT][API_FAIL] HTTP Error for symbol=%s: %s", symbol, e)
-            raise
-
-        except requests.exceptions.Timeout as e:
-            logger.exception("[EXTRACT][API_FAIL] Timeout Error for symbol=%s: %s", symbol, e)
-            raise
-
-        except requests.exceptions.ConnectionError as e:
-            logger.exception("[EXTRACT][API_FAIL] Connection Error for symbol=%s: %s", symbol, e)
-            raise
-
-        except requests.exceptions.RequestException as e:
-            logger.exception("[EXTRACT][API_FAIL] Request Error for symbol=%s: %s", symbol, e)
-            raise
-
-        except ValueError as e:
-            logger.exception("[EXTRACT][API_FAIL] JSON Decode Error for symbol=%s: %s", symbol, e)
-            raise
 
     # ============================================================
     # BRONZE LAYER EXTRACTORS

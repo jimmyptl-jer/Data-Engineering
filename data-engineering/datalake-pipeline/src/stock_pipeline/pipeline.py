@@ -5,34 +5,28 @@ This module contains the StockPipeline class which ties together
 the Extractor, Transformer, Loader, and Watermark components,
 implementing a Medallion Architecture (Bronze -> Silver -> Gold).
 
-Key Pipeline Phases:
-    1. Ingestion:
-       Fetches raw JSON payloads from APIs and lands them in S3 Bronze.
+Ingestion (API -> Bronze) is NOT part of this job. It runs in the
+per-source Lambdas under `ingestion/` (alpha_vantage, finnhub, massive),
+which land raw JSON in S3 Bronze. This job picks that data up by run_id.
 
-    2. Bronze-to-Silver:
+Key Pipeline Phases:
+    1. Bronze-to-Silver:
        Extracts raw data, applies transformations, validations,
        watermark processing, and writes Silver outputs.
 
-    3. Gold Build:
+    2. Gold Build:
        Reads Silver datasets, joins business datasets,
        and writes the unified dataset to S3 Gold.
 """
 
 import logging
-import os
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, max as spark_max
+from pyspark.sql.functions import max as spark_max
 
 from . import config
 from .extract import StockDataExtractor, MassiveApiExtractor
-from .load import StockDataLoader
-from .utils import APIKeyManager
-
-from .ingestion.alpha_vantage_ingestion import AlphaVantageIngestion
-from .ingestion.massive_ingestion import MassiveIngestion
-from .ingestion.finnhub_ingestion import FinnHubIngestion
 
 from .watermark.manager import WatermarkManager
 
@@ -215,7 +209,6 @@ class StockPipeline:
 
     Responsibilities:
         - Initialize pipeline dependencies.
-        - Ingest external API data into Bronze.
         - Process Bronze data into Silver.
         - Manage incremental watermarks.
         - Build the Gold unified dataset.
@@ -233,10 +226,7 @@ class StockPipeline:
             - AWS configuration
             - SparkSession
             - Bronze/Silver extractors
-            - S3 loader
             - Watermark manager
-            - API key manager
-            - External API ingestion clients
         """
 
         logger.info(
@@ -244,13 +234,7 @@ class StockPipeline:
         )
 
         try:
-            self.aws_access_key_id = config.AWS_ACCESS_KEY_ID
-            self.aws_secret_access_key = config.AWS_SECRET_ACCESS_KEY
             self.s3_bucket_name = config.S3_BUCKET_NAME
-
-            self.alpha_vantage_config = (
-                config.ALPHA_VANTAGE_ENDPOINTS
-            )
 
             self.silver_base_path = config.SILVER_BASE_PATH
             self.gold_base_path = config.GOLD_BASE_PATH
@@ -269,29 +253,6 @@ class StockPipeline:
                 self.spark
             )
 
-            self.loader = StockDataLoader(
-                self.aws_access_key_id,
-                self.aws_secret_access_key,
-            )
-
-            self.api_key = APIKeyManager()
-
-            self.ingestion = AlphaVantageIngestion(
-                extractor=self.extractor,
-                loader=self.loader,
-                bucket_name=self.s3_bucket_name,
-            )
-
-            self.massive_ingestion = MassiveIngestion(
-                loader=self.loader,
-                bucket_name=self.s3_bucket_name,
-            )
-
-            self.finnhub_ingestion = FinnHubIngestion(
-                loader=self.loader,
-                bucket_name=self.s3_bucket_name,
-            )
-
             logger.info(
                 "[PIPELINE][INIT] StockPipeline initialized successfully | "
                 "bucket=%s",
@@ -303,289 +264,6 @@ class StockPipeline:
                 "[PIPELINE][INIT] Failed to initialize StockPipeline."
             )
             raise
-
-    # ========================================================
-    # INGESTION — ALPHA VANTAGE → BRONZE
-    # ========================================================
-
-    def _ingest_from_alphavantage_api(
-        self,
-        batch_id: str,
-        stock_symbols: list[str],
-        execution_start_time: datetime,
-    ) -> list[dict]:
-        """
-        Fetch Alpha Vantage data and write raw responses to Bronze.
-
-        Processes every configured endpoint for every stock symbol.
-
-        Returns:
-            List of ingestion results.
-        """
-
-        logger.info(
-            "[INGEST][ALPHAVANTAGE] Starting ingestion | "
-            "batch_id=%s | symbols=%d",
-            batch_id,
-            len(stock_symbols),
-        )
-
-        results = []
-
-        for symbol in stock_symbols:
-            for endpoint in self.alpha_vantage_config:
-
-                function = endpoint["function"]
-                dataset = endpoint["dataset"]
-
-                try:
-                    response = self.ingestion.ingest(
-                        symbol=symbol,
-                        function=function,
-                        dataset=dataset,
-                        datasource="alphavantage",
-                        execution_start_time=execution_start_time,
-                        run_id=batch_id,
-                    )
-
-                    results.append(
-                        {
-                            "symbol": symbol,
-                            "function": function,
-                            "response": response,
-                        }
-                    )
-
-                except Exception as e:
-                    logger.exception(
-                        "[INGEST][ALPHAVANTAGE] Ingestion failed | "
-                        "symbol=%s | function=%s | batch_id=%s",
-                        symbol,
-                        function,
-                        batch_id,
-                    )
-
-                    results.append(
-                        {
-                            "symbol": symbol,
-                            "function": function,
-                            "error": str(e),
-                        }
-                    )
-
-        logger.info(
-            "[INGEST][ALPHAVANTAGE] Ingestion completed | "
-            "batch_id=%s | requests=%d",
-            batch_id,
-            len(results),
-        )
-
-        return results
-
-    # ========================================================
-    # INGESTION — FINNHUB → BRONZE
-    # ========================================================
-
-    def _ingest_from_finnhub_api(
-        self,
-        batch_id: str,
-        execution_start_time: datetime,
-    ) -> list[dict]:
-        """
-        Fetch Finnhub data and write raw responses to Bronze.
-        """
-
-        logger.info(
-            "[INGEST][FINNHUB] Starting ingestion | "
-            "batch_id=%s",
-            batch_id,
-        )
-
-        results = []
-
-        try:
-            response = self.finnhub_ingestion.ingest_stocks_list(
-                exchange="US",
-                execution_start_time=execution_start_time,
-                run_id=batch_id,
-            )
-
-            status = (
-                "SUCCESS"
-                if response is not None
-                else "FAILED"
-            )
-
-            results.append(
-                {
-                    "source": "finnhub",
-                    "dataset": "exchanges",
-                    "batch_id": batch_id,
-                    "status": status,
-                    "response": response,
-                }
-            )
-
-            logger.info(
-                "[INGEST][FINNHUB] Ingestion completed | "
-                "batch_id=%s | status=%s | datasets=%d",
-                batch_id,
-                status,
-                len(results),
-            )
-
-            return results
-
-        except Exception:
-            logger.exception(
-                "[INGEST][FINNHUB] Ingestion failed | "
-                "batch_id=%s",
-                batch_id,
-            )
-            raise
-
-    # ========================================================
-    # INGESTION — MASSIVE → BRONZE
-    # ========================================================
-
-    def _ingest_from_massive_api(
-        self,
-        batch_id: str,
-        execution_start_time: datetime,
-        symbol: str,
-    ) -> list[dict]:
-        """
-        Ingest configured datasets from the Massive API.
-
-        Datasets:
-            - exchanges
-            - aggregates
-            - stock overview
-            - dividends
-        """
-
-        logger.info(
-            "[INGEST][MASSIVE] Starting ingestion | "
-            "batch_id=%s | symbol=%s",
-            batch_id,
-            symbol,
-        )
-
-        results = []
-
-        try:
-            response = self.massive_ingestion.ingest_exchanges(
-                datasource="massive",
-                execution_start_time=execution_start_time,
-                run_id=batch_id,
-            )
-
-            results.append(
-                {
-                    "source": "massive",
-                    "dataset": "exchanges",
-                    "batch_id": batch_id,
-                    "status": (
-                        "SUCCESS"
-                        if response is not None
-                        else "FAILED"
-                    ),
-                    "response": response,
-                }
-            )
-
-            response = self.massive_ingestion.ingest_aggregates(
-                datasource="massive",
-                symbol=symbol,
-                execution_start_time=execution_start_time,
-                run_id=batch_id,
-                multiplier=1,
-                timespan="day",
-                from_date="2026-07-20",
-                to_date="2026-08-10",
-            )
-
-            results.append(
-                {
-                    "source": "massive",
-                    "dataset": "aggregates",
-                    "batch_id": batch_id,
-                    "status": (
-                        "SUCCESS"
-                        if response is not None
-                        else "FAILED"
-                    ),
-                    "response": response,
-                }
-            )
-
-            response = self.massive_ingestion.ingest_stock_overview(
-                datasource="massive",
-                execution_start_time=execution_start_time,
-                run_id=batch_id,
-                symbol=symbol,
-            )
-
-            results.append(
-                {
-                    "source": "massive",
-                    "dataset": "stock_overview",
-                    "batch_id": batch_id,
-                    "status": (
-                        "SUCCESS"
-                        if response is not None
-                        else "FAILED"
-                    ),
-                    "response": response,
-                }
-            )
-
-            response = self.massive_ingestion.ingest_dividends(
-                datasource="massive",
-                execution_start_time=execution_start_time,
-                run_id=batch_id,
-                symbol=symbol,
-            )
-
-            results.append(
-                {
-                    "source": "massive",
-                    "dataset": "dividends",
-                    "batch_id": batch_id,
-                    "status": (
-                        "SUCCESS"
-                        if response is not None
-                        else "FAILED"
-                    ),
-                    "response": response,
-                }
-            )
-
-            logger.info(
-                "[INGEST][MASSIVE] Ingestion completed | "
-                "batch_id=%s | datasets=%d",
-                batch_id,
-                len(results),
-            )
-
-        except Exception as e:
-            logger.exception(
-                "[INGEST][MASSIVE] Ingestion failed | "
-                "batch_id=%s | error=%s",
-                batch_id,
-                str(e),
-            )
-
-            results.append(
-                {
-                    "source": "massive",
-                    "batch_id": batch_id,
-                    "status": "FAILED",
-                    "error": str(e),
-                }
-            )
-
-        return results
 
     # ========================================================
     # SILVER — DAILY TIME SERIES
@@ -754,8 +432,6 @@ class StockPipeline:
         """
         Process Massive exchange reference data from Bronze to Silver.
         """
-
-        pipeline_name = "bronze_to_silver"
 
         logger.info(
             "[SILVER][EXCHANGES] Starting processing | "
@@ -1403,17 +1079,15 @@ class StockPipeline:
     def run(
         self,
         execution_start_time: datetime,
-        stock_symbols: list[str],
+        run_id: str | None = None,
         full_load: bool = False,
     ) -> list[dict]:
         """
-        Execute the complete end-to-end Medallion ETL pipeline.
+        Execute the Bronze → Silver → Gold stages of the Medallion pipeline.
 
         Pipeline flow:
 
-            External APIs
-                ↓
-            Bronze Layer
+            Bronze Layer (written by the ingestion Lambdas)
                 ↓
             Silver Layer
                 ↓
@@ -1426,10 +1100,13 @@ class StockPipeline:
 
         Args:
             execution_start_time:
-                UTC timestamp for the pipeline execution.
+                UTC timestamp for the pipeline execution. Its date selects
+                the Bronze `ingestion_date=` partition to read.
 
-            stock_symbols:
-                Stock symbols to process.
+            run_id:
+                Bronze `run_id=` partition to read. Must match the run_id
+                passed to the ingestion Lambdas. Defaults to
+                `batch_<YYYYmmdd_HHMMSS>` of the execution start time.
 
             full_load:
                 Whether the pipeline should perform a full load.
@@ -1439,7 +1116,7 @@ class StockPipeline:
                 Pipeline execution results.
         """
 
-        batch_id = (
+        batch_id = run_id or (
             f"batch_{execution_start_time.strftime('%Y%m%d_%H%M%S')}"
         )
 
@@ -1448,97 +1125,20 @@ class StockPipeline:
         logger.info(
             "[PIPELINE] Starting ETL execution | "
             "batch_id=%s | execution_start_time=%s | "
-            "full_load=%s | symbols=%s",
+            "full_load=%s",
             batch_id,
             execution_start_time.isoformat(),
             full_load,
-            stock_symbols,
         )
 
         try:
 
             # # ========================================================
-            # # STEP 1 — ALPHA VANTAGE → BRONZE
+            # # STEP 1 — ALPHA VANTAGE → SILVER
             # # ========================================================
 
             # logger.info(
-            #     "[PIPELINE][STEP 1/8] Alpha Vantage API → Bronze | "
-            #     "batch_id=%s",
-            #     batch_id,
-            # )
-
-            results_alphavantage = (
-                self._ingest_from_alphavantage_api(
-                    batch_id=batch_id,
-                    stock_symbols=stock_symbols,
-                    execution_start_time=execution_start_time,
-                )
-            )
-
-            logger.info(
-                "[PIPELINE][STEP 1/8] Alpha Vantage API → Bronze completed | "
-                "results=%s",
-                len(results_alphavantage),
-            )
-
-            # ========================================================
-            # STEP 2 — MASSIVE → BRONZE
-            # ========================================================
-
-            logger.info(
-                "[PIPELINE][STEP 2/8] Massive API → Bronze | "
-                "batch_id=%s",
-                batch_id,
-            )
-
-            results_massive = []
-
-            for symbol in stock_symbols:
-                massive_result = (
-                    self._ingest_from_massive_api(
-                        batch_id=batch_id,
-                        execution_start_time=execution_start_time,
-                        symbol=symbol,
-                    )
-                )
-
-                results_massive.extend(massive_result)
-
-            logger.info(
-                "[PIPELINE][STEP 2/8] Massive API → Bronze completed | "
-                "results=%s",
-                len(results_massive),
-            )
-
-            # ========================================================
-            # STEP 3 — FINNHUB → BRONZE
-            # ========================================================
-
-            # logger.info(
-            #     "[PIPELINE][STEP 3/8] Finnhub API → Bronze | "
-            #     "batch_id=%s",
-            #     batch_id,
-            # )
-
-            # results_finnhub = (
-            #     self._ingest_from_finnhub_api(
-            #         batch_id=batch_id,
-            #         execution_start_time=execution_start_time,
-            #     )
-            # )
-
-            # logger.info(
-            #     "[PIPELINE][STEP 3/8] Finnhub API → Bronze completed | "
-            #     "results=%s",
-            #     len(results_finnhub),
-            # )
-
-            # # ========================================================
-            # # STEP 4 — ALPHA VANTAGE → SILVER
-            # # ========================================================
-
-            # logger.info(
-            #     "[PIPELINE][STEP 4/8] Alpha Vantage Bronze → Silver."
+            #     "[PIPELINE][STEP 1/5] Alpha Vantage Bronze → Silver."
             # )
 
             # daily_processing = self._process_daily_dataset(
@@ -1554,18 +1154,18 @@ class StockPipeline:
             )
 
             # logger.info(
-            #     "[PIPELINE][STEP 4/8] Alpha Vantage Silver processing "
+            #     "[PIPELINE][STEP 1/5] Alpha Vantage Silver processing "
             #     "completed | daily=%s | overview=%s",
             #     daily_processing,
             #     overview_processing,
             # )
 
             # ========================================================
-            # STEP 5 — MASSIVE → SILVER
+            # STEP 2 — MASSIVE → SILVER
             # ========================================================
 
             logger.info(
-                "[PIPELINE][STEP 5/8] Massive Bronze → Silver."
+                "[PIPELINE][STEP 2/5] Massive Bronze → Silver."
             )
 
             # massive_exchange_processing = (
@@ -1605,17 +1205,17 @@ class StockPipeline:
             # )
 
             logger.info(
-                "[PIPELINE][STEP 5/8] Massive Silver processing completed | "
+                "[PIPELINE][STEP 2/5] Massive Silver processing completed | "
                 "stock_overview=%s",
                 stock_overview_processing,
             )
 
             # ========================================================
-            # # STEP 6 — FINNHUB → SILVER
+            # # STEP 3 — FINNHUB → SILVER
             # # ========================================================
 
             # logger.info(
-            #     "[PIPELINE][STEP 6/8] Finnhub Bronze → Silver."
+            #     "[PIPELINE][STEP 3/5] Finnhub Bronze → Silver."
             # )
 
             # stocks_list_processing = (
@@ -1628,13 +1228,13 @@ class StockPipeline:
             # )
 
             # logger.info(
-            #     "[PIPELINE][STEP 6/8] Finnhub Silver processing completed | "
+            #     "[PIPELINE][STEP 3/5] Finnhub Silver processing completed | "
             #     "ticker_reference=%s",
             #     stocks_list_processing,
             # )
 
             # # ========================================================
-            # # STEP 7 — SILVER → GOLD
+            # # STEP 4 — SILVER → GOLD
             # # ========================================================
             
             stock_overview_csv = (
@@ -1670,7 +1270,7 @@ class StockPipeline:
             )
             
             # logger.info(
-            #     "[PIPELINE][STEP 7/8] Silver → Gold."
+            #     "[PIPELINE][STEP 4/5] Silver → Gold."
             # )
 
             # self._build_gold_layer(
@@ -1678,11 +1278,11 @@ class StockPipeline:
             # )
 
             # logger.info(
-            #     "[PIPELINE][STEP 7/8] Silver → Gold completed."
+            #     "[PIPELINE][STEP 4/5] Silver → Gold completed."
             # )
 
             # ========================================================
-            # STEP 8 — PIPELINE COMPLETION
+            # STEP 5 — PIPELINE COMPLETION
             # ========================================================
 
             pipeline_duration = (
@@ -1691,7 +1291,7 @@ class StockPipeline:
             ).total_seconds()
 
             logger.info(
-                "[PIPELINE][STEP 8/8] ETL execution completed successfully | "
+                "[PIPELINE][STEP 5/5] ETL execution completed successfully | "
                 "batch_id=%s | duration_seconds=%.2f",
                 batch_id,
                 pipeline_duration,
@@ -1701,12 +1301,9 @@ class StockPipeline:
                 "status": "success",
                 "batch_id": batch_id,
                 "duration_seconds": pipeline_duration,
-                # "alphavantage": results_alphavantage,
-                "massive": results_massive,
-                # "finnhub": results_finnhub,
                 "silver": {
                     # "daily": daily_processing,
-                    # "overview": overview_processing,
+                    "overview": overview_processing,
                     # "exchanges": massive_exchange_processing,
                     "stock_overview": stock_overview_processing,
                     # "aggregates": aggregates_processing,

@@ -35,13 +35,35 @@ Parameters:
     Type: String
     Default: graywolf-stock-data-bucket
 
-  StockSymbols:
-    Type: String
-    Default: "IBM"
-
   ScheduleExpression:
     Type: String
     Default: "cron(0 14 ? * MON-FRI *)"
+    Description: When the end-to-end workflow (ingest → transform) runs
+
+  StockSymbol:
+    Type: String
+    Default: "IBM"
+    Description: Stock symbol passed to the ingestion Lambdas
+
+  FinnhubExchange:
+    Type: String
+    Default: "US"
+    Description: Exchange passed to the Finnhub ingestion Lambda
+
+  AlphaVantageIngestFunctionName:
+    Type: String
+    Default: "ingest-alpha-vantage-Development"
+    Description: Deployed by ingestion/alpha_vantage (ingest-alpha-vantage-<EnvironmentName>)
+
+  MassiveIngestFunctionName:
+    Type: String
+    Default: "ingest-massive"
+    Description: Deployed by ingestion/massive
+
+  FinnhubIngestFunctionName:
+    Type: String
+    Default: "ingest-finnhub"
+    Description: Deployed by ingestion/finnhub
 
   EnableSchedule:
     Type: String
@@ -50,54 +72,6 @@ Parameters:
       - "true"
       - "false"
 
-  AlphaVantageApiKey:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey1:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey2:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey3:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey4:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey5:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey6:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey7:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey8:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey9:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey10:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey11:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey12:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey13:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey14:
-    Type: String
-    NoEcho: true
-  AlphaVantageApiKey15:
-    Type: String
-    NoEcho: true
 
 # ============================================================
 # CONDITIONS
@@ -213,22 +187,6 @@ Resources:
 
       Environment:
         Variables:
-          ALPHA_VANTAGE_API_KEY: !Ref AlphaVantageApiKey
-          ALPHA_VANTAGE_API_KEY_1: !Ref AlphaVantageApiKey1
-          ALPHA_VANTAGE_API_KEY_2: !Ref AlphaVantageApiKey2
-          ALPHA_VANTAGE_API_KEY_3: !Ref AlphaVantageApiKey3
-          ALPHA_VANTAGE_API_KEY_4: !Ref AlphaVantageApiKey4
-          ALPHA_VANTAGE_API_KEY_5: !Ref AlphaVantageApiKey5
-          ALPHA_VANTAGE_API_KEY_6: !Ref AlphaVantageApiKey6
-          ALPHA_VANTAGE_API_KEY_7: !Ref AlphaVantageApiKey7
-          ALPHA_VANTAGE_API_KEY_8: !Ref AlphaVantageApiKey8
-          ALPHA_VANTAGE_API_KEY_9: !Ref AlphaVantageApiKey9
-          ALPHA_VANTAGE_API_KEY_10: !Ref AlphaVantageApiKey10
-          ALPHA_VANTAGE_API_KEY_11: !Ref AlphaVantageApiKey11
-          ALPHA_VANTAGE_API_KEY_12: !Ref AlphaVantageApiKey12
-          ALPHA_VANTAGE_API_KEY_13: !Ref AlphaVantageApiKey13
-          ALPHA_VANTAGE_API_KEY_14: !Ref AlphaVantageApiKey14
-          ALPHA_VANTAGE_API_KEY_15: !Ref AlphaVantageApiKey15
           S3_BUCKET_NAME: !Ref DatalakeBucket
 
       Policies:
@@ -244,14 +202,173 @@ Resources:
                 - !GetAtt DatalakeBucket.Arn
                 - !Sub "${DatalakeBucket.Arn}/*"
 
+
+  # ----------------------------------------------------------
+  # END-TO-END WORKFLOW (Step Functions)
+  #
+  # 1. Generate one run_id for this execution.
+  # 2. Run the three ingestion Lambdas in parallel (API → Bronze).
+  #    The ingestion Lambdas report failure as statusCode 500 rather
+  #    than raising, so each branch checks it and fails the workflow.
+  # 3. Run the transform Lambda for that run_id (Bronze → Silver → Gold).
+  # ----------------------------------------------------------
+
+  StockPipelineStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "stock-data-pipeline-${EnvironmentName}"
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AlphaVantageIngestFunctionName
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MassiveIngestFunctionName
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FinnhubIngestFunctionName
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StockPipelineFunction
       Events:
         ScheduledRun:
           Type: Schedule
           Properties:
             Schedule: !Ref ScheduleExpression
-            Description: Scheduled ETL pipeline execution
+            Description: Scheduled end-to-end pipeline execution
             Enabled: !If [IsScheduleEnabled, true, false]
-            Input: !Sub '{"stock_symbols": ["${StockSymbols}"]}'
+      Definition:
+        Comment: Ingest all sources into Bronze, then build Silver and Gold
+        StartAt: CreateRunId
+        States:
+          CreateRunId:
+            Type: Pass
+            Parameters:
+              run_id.$: "States.Format('batch_{}', $$.Execution.Name)"
+            Next: IngestToBronze
+          IngestToBronze:
+            Type: Parallel
+            ResultPath: null
+            Next: TransformBronzeToGold
+            Branches:
+              - StartAt: IngestAlphaVantage
+                States:
+                  IngestAlphaVantage:
+                    Type: Task
+                    Resource: arn:aws:states:::lambda:invoke
+                    Parameters:
+                      FunctionName: !Ref AlphaVantageIngestFunctionName
+                      Payload:
+                        run_id.$: $.run_id
+                        stock_symbols:
+                          - !Ref StockSymbol
+                    Retry:
+                      - ErrorEquals:
+                          - Lambda.ServiceException
+                          - Lambda.TooManyRequestsException
+                          - Lambda.SdkClientException
+                        IntervalSeconds: 5
+                        MaxAttempts: 3
+                        BackoffRate: 2
+                    ResultSelector:
+                      statusCode.$: $.Payload.statusCode
+                    ResultPath: $.result
+                    Next: CheckAlphaVantage
+                  CheckAlphaVantage:
+                    Type: Choice
+                    Choices:
+                      - Variable: $.result.statusCode
+                        NumericEquals: 500
+                        Next: AlphaVantageFailed
+                    Default: AlphaVantageSucceeded
+                  AlphaVantageFailed:
+                    Type: Fail
+                    Error: IngestionFailed
+                    Cause: Alpha Vantage ingestion Lambda returned statusCode 500
+                  AlphaVantageSucceeded:
+                    Type: Succeed
+              - StartAt: IngestMassive
+                States:
+                  IngestMassive:
+                    Type: Task
+                    Resource: arn:aws:states:::lambda:invoke
+                    Parameters:
+                      FunctionName: !Ref MassiveIngestFunctionName
+                      Payload:
+                        run_id.$: $.run_id
+                        symbol: !Ref StockSymbol
+                    Retry:
+                      - ErrorEquals:
+                          - Lambda.ServiceException
+                          - Lambda.TooManyRequestsException
+                          - Lambda.SdkClientException
+                        IntervalSeconds: 5
+                        MaxAttempts: 3
+                        BackoffRate: 2
+                    ResultSelector:
+                      statusCode.$: $.Payload.statusCode
+                    ResultPath: $.result
+                    Next: CheckMassive
+                  CheckMassive:
+                    Type: Choice
+                    Choices:
+                      - Variable: $.result.statusCode
+                        NumericEquals: 500
+                        Next: MassiveFailed
+                    Default: MassiveSucceeded
+                  MassiveFailed:
+                    Type: Fail
+                    Error: IngestionFailed
+                    Cause: Massive ingestion Lambda returned statusCode 500
+                  MassiveSucceeded:
+                    Type: Succeed
+              - StartAt: IngestFinnhub
+                States:
+                  IngestFinnhub:
+                    Type: Task
+                    Resource: arn:aws:states:::lambda:invoke
+                    Parameters:
+                      FunctionName: !Ref FinnhubIngestFunctionName
+                      Payload:
+                        run_id.$: $.run_id
+                        exchange: !Ref FinnhubExchange
+                    Retry:
+                      - ErrorEquals:
+                          - Lambda.ServiceException
+                          - Lambda.TooManyRequestsException
+                          - Lambda.SdkClientException
+                        IntervalSeconds: 5
+                        MaxAttempts: 3
+                        BackoffRate: 2
+                    ResultSelector:
+                      statusCode.$: $.Payload.statusCode
+                    ResultPath: $.result
+                    Next: CheckFinnhub
+                  CheckFinnhub:
+                    Type: Choice
+                    Choices:
+                      - Variable: $.result.statusCode
+                        NumericEquals: 500
+                        Next: FinnhubFailed
+                    Default: FinnhubSucceeded
+                  FinnhubFailed:
+                    Type: Fail
+                    Error: IngestionFailed
+                    Cause: Finnhub ingestion Lambda returned statusCode 500
+                  FinnhubSucceeded:
+                    Type: Succeed
+          TransformBronzeToGold:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !Ref StockPipelineFunction
+              Payload:
+                run_id.$: $.run_id
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.TooManyRequestsException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 5
+                MaxAttempts: 3
+                BackoffRate: 2
+            End: true
 
   # ----------------------------------------------------------
   # CLOUDWATCH LOG GROUP (Explicit — sets retention)
@@ -329,6 +446,40 @@ Resources:
         - Key: ManagedBy
           Value: AWS SAM
 
+  # ----------------------------------------------------------
+  # CLOUDWATCH ALARM — Workflow failures
+  # ----------------------------------------------------------
+
+  StockPipelineWorkflowFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "stock-pipeline-workflow-failed-${EnvironmentName}"
+      AlarmDescription: Triggers when the end-to-end Step Functions workflow (ingest → transform) fails
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref StockPipelineStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+
 # ============================================================
 # OUTPUTS
 # ============================================================
@@ -349,6 +500,10 @@ Outputs:
   DatalakeBucketName:
     Description: S3 data lake bucket name
     Value: !Ref DatalakeBucket
+
+  StateMachineArn:
+    Description: Step Functions workflow that runs ingestion then the transform
+    Value: !Ref StockPipelineStateMachine
 
   AlertTopicArn:
     Description: SNS topic for pipeline alerts — subscribe your email/Slack webhook here

@@ -244,6 +244,17 @@ def transform_massive_exchanges_dataset(
         # STEP 8: ROW COUNT METRICS
         # ========================================================
 
+        total_in = data_df.count()
+        total_out = exchange_df.count()
+
+        valid_count = exchange_df.filter(
+            col("validation_status") == "VALID"
+        ).count()
+
+        invalid_count = exchange_df.filter(
+            col("validation_status") == "INVALID"
+        ).count()
+
         logger.info(
             "[MASSIVE][EXCHANGES][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",

@@ -546,8 +546,34 @@ def silver_transform_daily_timeseries(
             valid_stock_df.show(10, truncate=False)
 
         # ========================================================
+        # STEP 17b: WATERMARK FILTER
+        #
+        # Applied after the rolling/lag features so those are still
+        # computed over the full history. Keeps only rows newer than
+        # the last processed day (day_date > watermark_value).
+        # ========================================================
+
+        if watermark_value:
+            valid_stock_df = valid_stock_df.filter(
+                col("day_date") > F.to_date(F.lit(str(watermark_value)))
+            )
+
+            logger.info(
+                "[ALPHAVANTAGE][DAILY] Watermark filter applied | "
+                "watermark=%s",
+                watermark_value,
+            )
+
+        # ========================================================
         # STEP 18: ROW COUNT METRICS
         # ========================================================
+
+        total_in = data_df.count()
+        total_out = valid_stock_df.count()
+
+        valid_count = valid_stock_df.filter(
+            col("validation_status") == "VALID"
+        ).count()
 
         logger.info(
             "[ALPHAVANTAGE][DAILY][METRICS] "

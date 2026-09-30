@@ -1,0 +1,27 @@
+version = 0.1
+
+# ============================================================
+# Massive Ingestion Lambda — SAM Deploy Config
+#
+# Deploy:   cd ingestion/massive
+#           sam build && sam deploy
+#
+# Local:    sam local invoke MassiveIngestFunction \
+#             -e events/test_event.json \
+#             --env-vars env.json
+# ============================================================
+
+# EnableSchedule is false: the Step Functions workflow in the root
+# template.yaml invokes this Lambda with a shared run_id.
+[default.deploy.parameters]
+stack_name        = "ingest-massive-exchanges"
+resolve_s3        = true
+s3_prefix         = "ingest-massive-exchanges"
+confirm_changeset = true
+capabilities      = "CAPABILITY_IAM"
+disable_rollback  = true
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" EnableSchedule=\"false\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

@@ -75,7 +75,6 @@ from pyspark.sql.functions import (
     initcap
 )
 from pyspark.sql.types import (
-    LongType,
     StringType,
 )
 
@@ -376,6 +375,17 @@ def transform_finnhub_stock_tickers_dataset(
         # ========================================================
         # STEP 11: ROW COUNT METRICS
         # ========================================================
+
+        total_in = data_df.count()
+        total_out = ticker_df.count()
+
+        valid_count = ticker_df.filter(
+            col("validation_status") == "VALID"
+        ).count()
+
+        invalid_count = ticker_df.filter(
+            col("validation_status") == "INVALID"
+        ).count()
 
         logger.info(
             "[FINNHUB][STOCK_TICKERS][METRICS] "

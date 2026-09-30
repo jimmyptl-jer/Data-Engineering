@@ -36,3 +36,6 @@ htmlcov/
 metastore_db/
 derby.log
 spark-warehouse/
+
+# AWS SAM build output
+.aws-sam/
