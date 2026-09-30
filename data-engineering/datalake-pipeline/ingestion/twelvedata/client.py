@@ -1,15 +1,17 @@
 """
-Alpha Vantage Ingestion — API Client.
+Twelve Data Ingestion — API Client.
 
 `fetch_endpoint()` makes one request for one symbol and API function and
-validates the payload. `fetch_alpha_vantage_api_data()` is the raw HTTP call.
+validates the payload. `fetch_twelvedata_api_data()` is the raw HTTP call.
 """
+
+from __future__ import annotations
 
 import logging
 
 import requests
 
-from config import  REQUEST_TIMEOUT_SECONDS, TwelveData_BASE_URL
+from config import REQUEST_TIMEOUT_SECONDS, TWELVEDATA_BASE_URL
 from keys import get_key
 
 
@@ -26,18 +28,18 @@ def fetch_endpoint(
     additional_params: dict | None = None,
 ) -> dict:
     """
-    Fetch one Alpha Vantage API function for one symbol.
+    Fetch one Twelve Data API function for one symbol.
 
     Args:
         symbol: Stock ticker symbol.
-        function: Alpha Vantage function (e.g. TIME_SERIES_DAILY, OVERVIEW).
-        additional_params: Extra query parameters (e.g. outputsize).
+        function: Endpoint name from config.TWELVEDATA_ENDPOINTS (e.g. TIME_SERIES).
+        additional_params: Extra query parameters (e.g. interval, outputsize).
 
     Returns:
         dict: Decoded JSON payload.
 
     Raises:
-        ValueError: If Alpha Vantage returns an "Error Message".
+        ValueError: If Twelve Data returns "status": "error".
         requests.exceptions.RequestException: On HTTP or network errors.
     """
 
@@ -49,6 +51,7 @@ def fetch_endpoint(
 
     params = {
         "symbol": symbol,
+        "interval": "1min",
         "apikey": api_key,
     }
 
@@ -95,7 +98,7 @@ def validate_response(
     """
 
     logger.debug(
-        "[INGESTION][ALPHAVANTAGE][VALIDATION_START] "
+        "[INGESTION][TWELVEDATA][VALIDATION_START] "
         "Starting basic response validation | symbol=%s",
         symbol,
     )
@@ -103,8 +106,8 @@ def validate_response(
     if not data:
 
         logger.warning(
-            "[INGESTION][ALPHAVANTAGE][EMPTY_RESPONSE] "
-            "Alpha Vantage returned an empty response | "
+            "[INGESTION][TWELVEDATA][EMPTY_RESPONSE] "
+            "Twelve Data returned an empty response | "
             "symbol=%s | function=%s",
             symbol,
             function,
@@ -128,7 +131,7 @@ def validate_response(
             )
 
     logger.debug(
-        "[INGESTION][ALPHAVANTAGE][VALIDATION_COMPLETE] "
+        "[INGESTION][TWELVEDATA][VALIDATION_COMPLETE] "
         "Response validation completed | symbol=%s",
         symbol,
     )
@@ -147,7 +150,7 @@ def fetch_twelvedata_api_data(
     Args:
         params:
             Dictionary containing query parameters:
-            function, symbol, apikey, and optional parameters.
+            symbol, apikey, and optional parameters.
 
     Returns:
         dict:
@@ -159,7 +162,7 @@ def fetch_twelvedata_api_data(
     try:
 
         response = requests.get(
-            TwelveData_BASE_URL,
+            TWELVEDATA_BASE_URL,
             params=params,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )

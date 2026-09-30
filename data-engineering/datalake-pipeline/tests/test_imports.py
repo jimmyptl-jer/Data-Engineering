@@ -6,7 +6,7 @@ import pytest
 
 from conftest import INGESTION_ROOT, load_lambda, load_template
 
-SOURCES = ["alpha_vantage", "finnhub", "massive"]
+SOURCES = ["alpha_vantage", "finnhub", "massive", "twelvedata"]
 
 
 @pytest.mark.parametrize("module", [

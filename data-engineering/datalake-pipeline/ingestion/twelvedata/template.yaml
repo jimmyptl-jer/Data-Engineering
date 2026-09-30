@@ -3,8 +3,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-  Alpha Vantage Ingestion Lambda.
-  Fetches Daily Time-Series and Company Overview data
+  Twelve Data Ingestion Lambda.
+  Fetches 1-minute time-series (OHLCV) bars once a day
   and lands raw JSON payloads into the S3 Bronze layer.
 
 # ============================================================
@@ -38,17 +38,16 @@ Parameters:
   S3BucketName:
     Type: String
     Default: graywolf--data--lake
-    Description: Target S3 data lake bucket
-
-  StockSymbols:
-    Type: String
-    Default: "IBM"
-    Description: Comma-separated stock symbols to ingest
+    Description: >
+      S3 bucket the Lambda may write to (IAM policy only; the code
+      uses config.S3_BUCKET_NAME)
 
   ScheduleExpression:
     Type: String
-    Default: "cron(0 14 ? * MON-FRI *)"
-    Description: EventBridge schedule expression
+    Default: "cron(30 21 ? * MON-FRI *)"
+    Description: >
+      EventBridge schedule expression (UTC). 21:30 UTC is after the
+      16:00 ET close in both EDT and EST.
 
   EnableSchedule:
     Type: String
@@ -71,31 +70,27 @@ Conditions:
 # ============================================================
 
 Resources:
-  AlphaVantageIngestFunction:
+  TwelveDataIngestFunction:
     Type: AWS::Serverless::Function
 
     Properties:
-      FunctionName: !Sub "ingest-alpha-vantage-${EnvironmentName}"
+      FunctionName: !Sub "ingest-twelvedata-${EnvironmentName}"
 
       Handler: app.lambda_handler
 
       CodeUri: .
 
-      Description: Ingests Alpha Vantage data into S3 Bronze
+      Description: Ingests Twelve Data time series into S3 Bronze
 
       Architectures:
         - x86_64
 
       Tags:
-        Project: AlphaVantage-DataLake
+        Project: StockPipeline-DataLake
         Environment: !Ref EnvironmentName
         ManagedBy: AWS SAM
         Layer: Ingestion
-        Source: AlphaVantage
-
-      Environment:
-        Variables:
-          S3_BUCKET_NAME: !Ref S3BucketName
+        Source: TwelveData
 
       Policies:
         - Statement:
@@ -119,27 +114,25 @@ Resources:
           Properties:
             Schedule: !Ref ScheduleExpression
 
-            Description: Scheduled Alpha Vantage ingestion run
+            Description: Scheduled Twelve Data ingestion run
 
             Enabled: !If
               - IsScheduleEnabled
               - true
               - false
 
-            Input: !Sub |
-              {
-                "stock_symbols": ["${StockSymbols}"]
-              }
+            # Symbols come from config.DEFAULT_STOCK_SYMBOLS
+            Input: "{}"
 
   # ============================================================
   # CLOUDWATCH LOG GROUP
   # ============================================================
 
-  AlphaVantageIngestLogGroup:
+  TwelveDataIngestLogGroup:
     Type: AWS::Logs::LogGroup
 
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${AlphaVantageIngestFunction}"
+      LogGroupName: !Sub "/aws/lambda/${TwelveDataIngestFunction}"
 
       RetentionInDays: 30
 
@@ -149,13 +142,13 @@ Resources:
 
 Outputs:
   FunctionName:
-    Description: Alpha Vantage ingestion Lambda function name
-    Value: !Ref AlphaVantageIngestFunction
+    Description: Twelve Data ingestion Lambda function name
+    Value: !Ref TwelveDataIngestFunction
 
   FunctionArn:
-    Description: Alpha Vantage ingestion Lambda function ARN
-    Value: !GetAtt AlphaVantageIngestFunction.Arn
+    Description: Twelve Data ingestion Lambda function ARN
+    Value: !GetAtt TwelveDataIngestFunction.Arn
 
   LogGroupName:
     Description: CloudWatch log group name
-    Value: !Ref AlphaVantageIngestLogGroup
+    Value: !Ref TwelveDataIngestLogGroup

@@ -1,17 +1,17 @@
 """
-Alpha Vantage Ingestion Lambda — Entry Point.
+Twelve Data Ingestion Lambda — Entry Point.
 
 SAM Handler: app.lambda_handler
 
-Fetches every endpoint in config.ALPHA_VANTAGE_ENDPOINTS (daily time series,
-company overview) for the requested symbols and lands the raw JSON payloads
-in the S3 Bronze layer.
+Fetches every endpoint in config.TWELVEDATA_ENDPOINTS (1-minute time series)
+for the requested symbols and lands the raw JSON payloads in the S3 Bronze
+layer.
 
 Event (all fields optional):
     {
-        "stock_symbols": ["AAPL", "MSFT"],     # else STOCK_SYMBOLS env, else ["IBM"]
-        "full_load": false,                    # true → outputsize=full for daily time series
-        "datasource": "alphavantage",          # Bronze source= partition
+        "stock_symbols": ["AAPL", "MSFT"],     # else config.DEFAULT_STOCK_SYMBOLS
+        "full_load": false,                    # true → outputsize=5000 bars, else 390 (one day)
+        "datasource": "twelvedata",            # Bronze source= partition
         "run_id": "batch_20260930_140000"      # Bronze run_id= partition; generated if absent
     }
 
@@ -21,16 +21,17 @@ Response:
 
 Files in this Lambda:
     app.py      lambda_handler: resolves the event, runs the ingestion, builds the response
-    ingest.py   AlphaVantageIngestion: loops symbols × endpoints, one Bronze file per response
-    client.py   fetch_endpoint(): one HTTP call to Alpha Vantage + response validation
-    keys.py     API key pool and random key selection
+    ingest.py   TwelveDataIngestion: loops symbols × endpoints, one Bronze file per response
+    client.py   fetch_endpoint(): one HTTP call to Twelve Data + response validation
+    keys.py     Twelve Data API key
     config.py   S3 bucket, base URL and the endpoint → dataset mapping
     bronze.py   Bronze S3 key layout + JSON writer
 """
 
+from __future__ import annotations
+
 import json
 import logging
-import os
 from datetime import datetime, timezone
 
 import config
@@ -58,36 +59,18 @@ logger = logging.getLogger(__name__)
 
 def resolve_stock_symbols(event: dict) -> list[str]:
     """
-    Symbols from the event, else the STOCK_SYMBOLS environment variable
-    (comma-separated), else config.DEFAULT_STOCK_SYMBOLS.
+    Symbols from the event, else config.DEFAULT_STOCK_SYMBOLS.
     """
 
     stock_symbols = event.get("stock_symbols")
 
     if not stock_symbols:
 
-        env_symbols = os.environ.get("STOCK_SYMBOLS", "")
-
-        stock_symbols = [
-            symbol.strip()
-            for symbol in env_symbols.split(",")
-            if symbol.strip()
-        ]
-
-        logger.info(
-            "[INGESTION][ALPHAVANTAGE][LAMBDA_SYMBOLS_FALLBACK] "
-            "No stock_symbols in event, falling back to "
-            "STOCK_SYMBOLS environment variable | symbols=%s",
-            stock_symbols,
-        )
-
-    if not stock_symbols:
-
         stock_symbols = list(config.DEFAULT_STOCK_SYMBOLS)
 
         logger.info(
-            "[INGESTION][ALPHAVANTAGE][LAMBDA_SYMBOLS_DEFAULT] "
-            "No stock_symbols in event or environment, "
+              "[INGESTION][TWELVEDATA][LAMBDA_SYMBOLS_DEFAULT] "
+            "No stock_symbols in event, "
             "falling back to default symbol list | symbols=%s",
             stock_symbols,
         )
@@ -101,18 +84,18 @@ def resolve_stock_symbols(event: dict) -> list[str]:
 
 def lambda_handler(event, context):
     """
-    AWS Lambda entrypoint for the Alpha Vantage ingestion job.
+    AWS Lambda entrypoint for the Twelve Data ingestion job.
     """
 
     logger.info(
-        "[INGESTION][ALPHAVANTAGE][LAMBDA_INVOCATION_START] "
+        "[INGESTION][TWELVEDATA][LAMBDA_INVOCATION_START] "
         "Lambda handler invoked | "
         "request_id=%s",
         getattr(context, "aws_request_id", None),
     )
 
     logger.debug(
-        "[INGESTION][ALPHAVANTAGE][LAMBDA_EVENT] "
+        "[INGESTION][TWELVEDATA][LAMBDA_EVENT] "
         "Raw event payload received | event=%s",
         event,
     )
@@ -121,7 +104,7 @@ def lambda_handler(event, context):
     execution_start_time = datetime.now(timezone.utc).replace(tzinfo=None)
 
     logger.info(
-        "[INGESTION][ALPHAVANTAGE][LAMBDA_EXECUTION_TIME] "
+        "[INGESTION][TWELVEDATA][LAMBDA_EXECUTION_TIME] "
         "Execution start time recorded | "
         "execution_start_time=%s",
         execution_start_time.isoformat(),
@@ -142,7 +125,7 @@ def lambda_handler(event, context):
         run_id = event.get("run_id")
 
         logger.info(
-            "[INGESTION][ALPHAVANTAGE][LAMBDA_PARAMS] "
+            "[INGESTION][TWELVEDATA][LAMBDA_PARAMS] "
             "Resolved lambda parameters | "
             "symbols=%d | full_load=%s | datasource=%s | run_id=%s",
             len(stock_symbols),
@@ -171,7 +154,7 @@ def lambda_handler(event, context):
         success_count = len(results) - error_count
 
         logger.info(
-            "[INGESTION][ALPHAVANTAGE][LAMBDA_INVOCATION_SUCCESS] "
+            "[INGESTION][TWELVEDATA][LAMBDA_INVOCATION_SUCCESS] "
             "Lambda handler completed | "
             "total=%d | successes=%d | errors=%d",
             len(results),
@@ -194,7 +177,7 @@ def lambda_handler(event, context):
     except Exception as e:
 
         logger.exception(
-            "[INGESTION][ALPHAVANTAGE][LAMBDA_INVOCATION_ERROR] "
+            "[INGESTION][TWELVEDATA][LAMBDA_INVOCATION_ERROR] "
             "Unhandled error during lambda invocation | error=%s",
             e,
         )
@@ -208,3 +191,14 @@ def lambda_handler(event, context):
                 }
             ),
         }
+
+
+# ============================================================
+# LOCAL RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    # `python app.py` runs one real ingestion: calls Twelve Data and
+    # writes to S3 with the local AWS credentials.
+    print(json.dumps(lambda_handler({}, None), indent=2))

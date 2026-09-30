@@ -1,3 +1,2 @@
-massive
 requests
 boto3

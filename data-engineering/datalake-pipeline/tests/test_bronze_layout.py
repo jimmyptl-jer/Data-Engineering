@@ -46,7 +46,7 @@ def assert_readable(key: str, extractor_cls=MassiveApiExtractor) -> re.Match:
 # KEY BUILDER (each Lambda folder has its own bronze.py)
 # ============================================================
 
-@pytest.mark.parametrize("source", ["alpha_vantage", "finnhub", "massive"])
+@pytest.mark.parametrize("source", ["alpha_vantage", "finnhub", "massive", "twelvedata"])
 @pytest.mark.parametrize("extractor_cls", [StockDataExtractor, MassiveApiExtractor])
 def test_bronze_key_matches_both_readers(source, extractor_cls):
     execution_time = datetime(2026, 9, 30, 23, 59, tzinfo=timezone.utc)
@@ -131,3 +131,38 @@ def test_finnhub_writes_where_transform_reads(ingestion_lambda, fake_http):
     assert (match["source"], match["dataset"], match["run_id"], match["file"]) == (
         "finnhub", "ticker_reference", RUN_ID, "US",
     )
+
+
+# ============================================================
+# TWELVE DATA
+# ============================================================
+
+def test_twelvedata_writes_where_transform_reads(ingestion_lambda, fake_http):
+    lam, bronze_s3 = ingestion_lambda("twelvedata")
+    calls = fake_http(lambda url, params: FakeResponse({
+        "meta": {"symbol": params["symbol"], "interval": "1min"},
+        "values": [{"datetime": "2026-09-30 15:59:00", "close": "250.10"}],
+        "status": "ok",
+    }))
+
+    response = lam.app.lambda_handler({"run_id": RUN_ID, "stock_symbols": ["ibm"]}, None)
+
+    assert response["statusCode"] == 200
+    [call] = calls
+    assert call["params"]["apikey"] == lam.keys.API_KEY
+    assert (call["params"]["interval"], call["params"]["outputsize"]) == ("1min", 390)
+    [key] = bronze_s3.keys
+    match = assert_readable(key, StockDataExtractor)
+    assert (match["source"], match["dataset"], match["run_id"], match["file"]) == (
+        "twelvedata", "time_series_1min", RUN_ID, "IBM",
+    )
+
+
+def test_twelvedata_status_error_is_reported(ingestion_lambda, fake_http):
+    lam, bronze_s3 = ingestion_lambda("twelvedata")
+    fake_http(lambda url, params: FakeResponse({"code": 429, "message": "rate limit", "status": "error"}))
+
+    response = lam.app.lambda_handler({"run_id": RUN_ID, "stock_symbols": ["IBM"]}, None)
+
+    assert response["statusCode"] == 207
+    assert bronze_s3.keys == []

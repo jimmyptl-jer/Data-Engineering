@@ -1,25 +1,27 @@
 """
-Alpha Vantage Ingestion — Symbol × Endpoint Loop.
+Twelve Data Ingestion — Symbol × Endpoint Loop.
 
-`AlphaVantageIngestion.ingest_symbols()` fetches every endpoint in
-ALPHA_VANTAGE_ENDPOINTS for every symbol and writes each raw response to
+`TwelveDataIngestion.ingest_symbols()` fetches every endpoint in
+TWELVEDATA_ENDPOINTS for every symbol and writes each raw response to
 S3 Bronze as .../dataset=<dataset>/.../<SYMBOL>.json. A failing endpoint
 is recorded in the results and does not stop the others.
 """
+
+from __future__ import annotations
 
 import logging
 from datetime import datetime
 
 from bronze import write_bronze_json
 from client import fetch_endpoint
-from config import DEFAULT_DATASOURCE, TwelveData_Endpoints
+from config import BARS_PER_TRADING_DAY, DEFAULT_DATASOURCE, TWELVEDATA_ENDPOINTS
 
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# ALPHA VANTAGE INGESTION CLASS
+# TWELVE DATA INGESTION CLASS
 # ============================================================
 
 
@@ -51,23 +53,23 @@ class TwelveDataIngestion:
         run_id: str | None = None,
     ) -> list[dict]:
         """
-        Fetch raw market data from Alpha Vantage API for all
+        Fetch raw market data from Twelve Data API for all
         symbols and configured endpoints, then write the raw
         JSON files to the S3 Bronze layer.
 
         Full Load vs Incremental Strategy:
 
         - Initial run / full_load=True:
-          Uses outputsize='full' for historical daily data.
+          Uses outputsize=5000 (~13 trading days of 1-minute bars).
 
         - Subsequent runs:
-          Uses outputsize='compact' for the latest daily data.
+          Uses outputsize=390 (one trading day of 1-minute bars).
 
         Returns:
             list[dict]: One entry per symbol/endpoint, with "response"
             (the Bronze key) on success or "error" on failure.
         """
-        
+
         results = []
 
         # Generate a run ID if one was not supplied
@@ -92,7 +94,7 @@ class TwelveDataIngestion:
             # LOOP THROUGH ENDPOINTS
             # =================================================
 
-            for endpoint in TwelveData_Endpoints:
+            for endpoint in TWELVEDATA_ENDPOINTS:
 
                 function = endpoint["function"]
                 dataset = endpoint["dataset"]
@@ -108,7 +110,7 @@ class TwelveDataIngestion:
                         run_id=run_id,
                         additional_params=self._load_mode_params(
                             symbol=symbol,
-                            function=function,
+                            endpoint=endpoint,
                             full_load=full_load,
                         ),
                     )
@@ -178,27 +180,45 @@ class TwelveDataIngestion:
         return results
 
     # ========================================================
-    # LOAD MODE (daily time series outputsize)
+    # LOAD MODE (time series interval + outputsize)
     # ========================================================
 
     @staticmethod
     def _load_mode_params(
         symbol: str,
-        function: str,
+        endpoint: dict,
         full_load: bool,
     ) -> dict:
         """
         Extra query parameters for the endpoint.
 
-        TIME_SERIES requires an interval. outputsize is a bar count
-        (Twelve Data max 5000, default 30): the maximum on a full load
-        (history), 100 otherwise (latest days only).
+        TIME_SERIES requires an interval (from the endpoint config).
+        outputsize is a bar count (Twelve Data max 5000, default 30): the
+        maximum on a full load (history), otherwise one trading day of
+        1-minute bars, since the Lambda runs once a day after the close.
         """
 
         additional_params = {}
 
-        if function != "TIME_SERIES":
+        if endpoint["function"] != "TIME_SERIES":
             return additional_params
+
+        additional_params["interval"] = endpoint["interval"]
+
+        outputsize = 5000 if full_load else BARS_PER_TRADING_DAY
+        additional_params["outputsize"] = outputsize
+
+        logger.info(
+            "[INGESTION][TWELVEDATA][LOAD_MODE] "
+            "%s load selected | "
+            "symbol=%s | interval=%s | outputsize=%d",
+            "Full" if full_load else "Incremental",
+            symbol,
+            endpoint["interval"],
+            outputsize,
+        )
+
+        return additional_params
 
         additional_params["interval"] = "1day"
 
@@ -249,8 +269,6 @@ class TwelveDataIngestion:
             str: The Bronze S3 key written.
         """
 
-        
-
         data = fetch_endpoint(
             symbol=symbol,
             function=function,
@@ -268,7 +286,7 @@ class TwelveDataIngestion:
         )
 
         logger.info(
-            "[INGESTION][ALPHAVANTAGE][INGEST_SUCCESS] "
+            "[INGESTION][TWELVEDATA][INGEST_SUCCESS] "
             "Ingestion completed successfully | "
             "symbol=%s | dataset=%s | "
             "run_id=%s | s3_key=%s",

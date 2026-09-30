@@ -1,26 +1,27 @@
 version = 0.1
 
 # ============================================================
-# Alpha Vantage Ingestion Lambda — SAM Deploy Config
+# Twelve Data Ingestion Lambda — SAM Deploy Config
 #
-# Deploy:   cd ingestion/alpha_vantage
+# Deploy:   cd ingestion/twelvedata
 #           sam build && sam deploy
 #
-# Local:    sam local invoke AlphaVantageIngestFunction \
+# Local:    sam local invoke TwelveDataIngestFunction \
 #             -e events/test_event.json \
 #             --env-vars env.json
 # ============================================================
 
-# EnableSchedule is false: the Step Functions workflow in the root
-# template.yaml invokes this Lambda with a shared run_id.
+# EnableSchedule is true: EventBridge runs this Lambda once a day after the
+# US close (21:30 UTC, Mon-Fri) to fetch that day's 1-minute bars. It is not
+# part of the Step Functions workflow in the root template.yaml.
 [default.deploy.parameters]
-stack_name        = "ingest-alpha-vantage"
+stack_name        = "ingest-twelvedata"
 resolve_s3        = true
-s3_prefix         = "ingest-alpha-vantage"
+s3_prefix         = "ingest-twelvedata"
 confirm_changeset = true
 capabilities      = "CAPABILITY_IAM"
 disable_rollback  = true
-parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" StockSymbols=\"IBM\" ScheduleExpression=\"cron(0 14 ? * MON-FRI *)\" EnableSchedule=\"false\""
+parameter_overrides = "EnvironmentName=\"Development\" S3BucketName=\"graywolf--data--lake\" ScheduleExpression=\"cron(30 21 ? * MON-FRI *)\" EnableSchedule=\"true\""
 image_repositories = []
 
 [default.global.parameters]

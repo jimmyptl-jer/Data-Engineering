@@ -1,14 +1,11 @@
 """
-Alpha Vantage Ingestion — Configuration.
+Twelve Data Ingestion — Configuration.
 
-Environment (set by template.yaml):
-    S3_BUCKET_NAME   Bronze bucket (required)
-    STOCK_SYMBOLS    Comma-separated fallback symbols when the event has
-                     none (read in app.py)
+All settings are hardcoded here; the Lambda reads no environment variables
+(the API key is in keys.py).
 """
 
 import logging
-import os
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +19,7 @@ S3_BUCKET_NAME = "graywolf--data--lake"
 
 logger.info(
     "[INGESTION][TWELVEDATA][CONFIG] "
-    "S3 bucket name loaded from environment | bucket=%s",
+    "S3 bucket name loaded | bucket=%s",
     S3_BUCKET_NAME,
 )
 
@@ -31,24 +28,28 @@ logger.info(
 # TWELVE DATA CONFIGURATION
 # ============================================================
 
-TwelveData_BASE_URL = "https://api.twelvedata.com/time_series"
+TWELVEDATA_BASE_URL = "https://api.twelvedata.com/time_series"
 
-# Seconds before an Twelve Data HTTP request times out
+# Seconds before a Twelve Data HTTP request times out
 REQUEST_TIMEOUT_SECONDS = 10
 
 # Bronze source= partition when the event has no "datasource"
 DEFAULT_DATASOURCE = "twelvedata"
 
-# Symbols ingested when neither the event nor STOCK_SYMBOLS has any
+# 1-minute bars in one regular US trading session (09:30-16:00 ET)
+BARS_PER_TRADING_DAY = 390
+
+# Symbols ingested when the event has none
 DEFAULT_STOCK_SYMBOLS = ["IBM"]
 
 
-TwelveData_Endpoints = [
+TWELVEDATA_ENDPOINTS = [
     {
         "function": "TIME_SERIES",
-        "dataset": "time_series",
+        "dataset": "time_series_1min",
+        "interval": "1min",
         "description": (
-            "OHLCV stock prices, volume, and trading metrics"
+            "1-minute OHLCV bars for the trading day"
         ),
     },
     # {
@@ -63,6 +64,6 @@ TwelveData_Endpoints = [
 logger.info(
     "[INGESTION][TWELVEDATA][CONFIG] "
     "Loaded %d Twelve Data endpoint definition(s): %s",
-    len(TwelveData_Endpoints),
-    [ep["function"] for ep in TwelveData_Endpoints],
+    len(TWELVEDATA_ENDPOINTS),
+    [ep["function"] for ep in TWELVEDATA_ENDPOINTS],
 )
