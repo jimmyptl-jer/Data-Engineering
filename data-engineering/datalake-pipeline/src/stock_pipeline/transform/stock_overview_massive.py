@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     col,
     lower,

@@ -27,9 +27,8 @@ Hadoop FileSystem Integration:
 """
 
 import logging
-from datetime import datetime, timezone
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession
 
 from . import config
 

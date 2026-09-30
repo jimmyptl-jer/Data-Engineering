@@ -411,6 +411,13 @@ def transform_weekly_timeseries(
         # STEP 14: ROW COUNT METRICS
         # ========================================================
 
+        total_in = data_df.count()
+        total_out = valid_stock_df.count()
+
+        valid_count = valid_stock_df.filter(
+            col("validation_status") == "VALID"
+        ).count()
+
         logger.info(
             "[ALPHAVANTAGE][WEEKLY][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",

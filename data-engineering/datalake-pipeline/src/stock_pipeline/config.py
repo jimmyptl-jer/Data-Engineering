@@ -2,14 +2,17 @@
 Centralized Configuration & Storage Architecture Module.
 
 Defines global pipeline constants, API endpoint mappings, data lake S3 path conventions,
-watermark strategy mappings, and AWS/Alpha Vantage environment variables.
+watermark strategy mappings, and environment variables.
 
 Data Lake Path Hierarchy:
   s3a://{S3_BUCKET_NAME}/
     └── stock/
-        ├── bronze/source=alphavantage/dataset={dataset}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/{SYMBOL}.json
-        ├── silver/source=alphavantage/dataset={dataset}/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/format={csv|parquet}/
-        └── gold/source=alphavantage/dataset=company_dataset/year=YYYY/month=MM/day=DD/hour=HH/minute=MM/format={csv|parquet}/
+        ├── bronze/source={source}/dataset={dataset}/ingestion_date=YYYY-MM-DD/run_id={run_id}/{file}.json
+        ├── silver/datasource={source}/dataset={dataset}/year=YYYY/month=MM/format={csv|parquet}/
+        └── gold/datasource=stock/dataset=company_dataset/year=YYYY/month=MM/format=csv/
+
+  Bronze is written by the ingestion Lambdas (ingestion/<source>/bronze.py).
+  SILVER_BASE_PATH and GOLD_BASE_PATH below are fixed to graywolf--data--lake.
 
 Incremental Processing Strategies:
   - daily_time_series  : 'date_based'  (Filters rows where day_date > watermark_value)
@@ -86,32 +89,8 @@ GOLD_BASE_PATH = (
 )
 
 # ============================================================
-# API KEYS & ENVIRONMENT CREDENTIALS
+# ENVIRONMENT
 # ============================================================
-
-# Multi-key rotation pool for API rate-limit avoidance (up to 16 keys)
-ALPHA_VANTAGE_API_KEYS = [
-    os.getenv("ALPHA_VANTAGE_API_KEY"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_1"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_2"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_3"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_4"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_5"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_6"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_7"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_8"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_9"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_10"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_11"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_12"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_13"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_14"),
-    os.getenv("ALPHA_VANTAGE_API_KEY_15"),
-]
-
-# AWS Credentials
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
 # Target S3 Data Lake Bucket
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "graywolf--data--lake")

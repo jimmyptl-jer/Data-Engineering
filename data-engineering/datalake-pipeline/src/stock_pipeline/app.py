@@ -1,7 +1,8 @@
 """
 Stock Data Pipeline — Entry Point Module.
 
-This module is the single entry point for the entire stock data pipeline.
+This module is the entry point for the Bronze → Silver → Gold transform job.
+Ingestion (API → Bronze) runs separately in the Lambdas under `ingestion/`.
 It can be invoked in two ways:
 
     1. AWS Lambda:  AWS invokes `lambda_handler(event, context)` on a scheduled
@@ -10,14 +11,14 @@ It can be invoked in two ways:
     2. Local CLI:   Run directly with `python -m src.stock_pipeline.app` for local
                     development and testing.
 
-All pipeline orchestration logic (ingestion, transforms, writes) lives in
+All pipeline orchestration logic (transforms, writes) lives in
 `pipeline.py`. This file only handles:
     - Logging setup
     - Lambda handler (entry point)
     - Local __main__ execution block
 
 SAM Template Reference:
-    Handler: src.stock_pipeline.app.lambda_handler   (template.yaml line 198)
+    Handler: src.stock_pipeline.app.lambda_handler
 """
 
 import logging
@@ -49,18 +50,21 @@ def lambda_handler(event, context):
     """
     AWS Lambda handler — the main entry point when deployed to AWS.
 
-    This function is invoked by AWS Lambda on a cron schedule
-    (default: weekdays at 2:00 PM UTC) or via manual trigger.
+    This function is invoked by the Step Functions workflow in template.yaml
+    (default schedule: weekdays at 2:00 PM UTC) after the ingestion Lambdas
+    have written Bronze, or via manual trigger.
 
     The event payload can optionally contain:
         {
-            "stock_symbols": ["IBM", "AAPL", "GOOG"]
+            "run_id": "batch_20260930_140000"
         }
 
-    If no symbols are specified, defaults to ["IBM"].
+    `run_id` selects the Bronze run to process and must match the run_id
+    given to the ingestion Lambdas. If omitted, the pipeline falls back to
+    `batch_<YYYYmmdd_HHMMSS>` of this execution.
 
     Args:
-        event (dict): Lambda invocation event. May contain 'stock_symbols' key.
+        event (dict): Lambda invocation event. May contain a 'run_id' key.
         context (LambdaContext): AWS Lambda runtime context (timeout, memory, etc.).
 
     Returns:
@@ -77,21 +81,19 @@ def lambda_handler(event, context):
         execution_start_time.isoformat(),
     )
 
-    # Extract stock symbols from the event payload, or use default
-    is_dict = isinstance(event, dict)
-    stock_symbols = event.get("stock_symbols", ["IBM"]) if is_dict else ["IBM"]
+    # Bronze run to process, shared with the ingestion Lambdas
+    run_id = event.get("run_id") if isinstance(event, dict) else None
 
     try:
         # Initialize the full pipeline (Spark, Extractors, Loaders, etc.)
         stock_pipeline = StockPipeline()
 
-        # Execute the end-to-end Medallion ETL pipeline:
-        #   1. Ingestion  → Bronze (raw JSON from APIs to S3)
-        #   2. Processing → Silver (cleaned, validated, enriched DataFrames)
-        #   3. Gold Build → Gold  (joined business dataset)
+        # Execute the Medallion transform stages:
+        #   1. Processing → Silver (cleaned, validated, enriched DataFrames)
+        #   2. Gold Build → Gold  (joined business dataset)
         results = stock_pipeline.run(
             execution_start_time=execution_start_time,
-            stock_symbols=stock_symbols,
+            run_id=run_id,
         )
 
         # Calculate and log total execution duration
