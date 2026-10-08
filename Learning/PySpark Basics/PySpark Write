@@ -1,0 +1,337 @@
+# PySpark Write — Complete Practical Guide
+
+---
+
+## Core Write Syntax
+
+```python
+df.write \
+    .format("parquet") \
+    .mode("overwrite") \
+    .option("key", "value") \
+    .partitionBy("year", "month") \
+    .save("s3://bucket/output/")
+```
+
+Every write operation has these 5 building blocks: **format, mode, options, partitioning, and destination.**
+
+---
+
+## 1. Write Modes
+
+Controls what happens when **data already exists** at the destination.
+
+```python
+df.write.mode("overwrite").parquet("s3://bucket/data/")
+```
+
+| Mode | Behavior | Use When |
+|---|---|---|
+| `overwrite` | Replaces everything at path | Full refresh / reprocessing |
+| `append` | Adds new files, keeps existing | Incremental loads, streaming |
+| `ignore` | Does nothing if data exists | Idempotent one-time loads |
+| `error` / `errorifexists` | Throws exception if path exists | Default — safety net |
+
+### ⚠️ Gotchas
+
+```python
+# DANGER: overwrite deletes the ENTIRE directory, not just matching partitions
+df.write.mode("overwrite").parquet("s3://bucket/orders/")  # wipes everything
+
+# SAFE: overwrite only specific partition
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+df.write.mode("overwrite").partitionBy("date").parquet("s3://bucket/orders/")
+```
+
+Always set `partitionOverwriteMode = dynamic` in production when writing partitioned data — otherwise you'll wipe partitions you didn't intend to touch.
+
+---
+
+## 2. Output Formats
+
+### Parquet — Your default choice for analytics
+
+```python
+df.write \
+    .mode("overwrite") \
+    .option("compression", "snappy")  # snappy / gzip / zstd / none
+    .parquet("s3://bucket/output/parquet/")
+```
+
+- Columnar, compressed, schema-preserving
+- Best for: **Athena, Glue, Redshift Spectrum, Spark-to-Spark**
+
+---
+
+### JSON
+
+```python
+df.write \
+    .mode("overwrite") \
+    .option("compression", "gzip") \
+    .json("s3://bucket/output/json/")
+```
+
+- Human-readable, schema flexible
+- Best for: **APIs, dead-letter queues, debugging output**
+- ⚠️ Writes one JSON object per line (JSONL), not a JSON array
+
+---
+
+### CSV
+
+```python
+df.write \
+    .mode("overwrite") \
+    .option("header", "true") \
+    .option("delimiter", ",") \
+    .option("quote", "\"") \
+    .option("escape", "\\") \
+    .csv("s3://bucket/output/csv/")
+```
+
+- Best for: **Reporting, Excel exports, downstream systems that need CSV**
+- ⚠️ No schema preservation — all types become strings on read
+
+---
+
+### Delta Lake — Production standard
+
+```python
+df.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .partitionBy("year", "month") \
+    .save("s3://bucket/delta/orders/")
+
+# Or write to a Delta table
+df.write \
+    .format("delta") \
+    .mode("append") \
+    .saveAsTable("orders")
+```
+
+- ACID transactions, schema enforcement, time travel
+- Best for: **Lakehouse architecture, upserts (MERGE), audit trails**
+
+---
+
+### JDBC — Writing to Databases
+
+```python
+df.write \
+    .format("jdbc") \
+    .option("url", "jdbc:mysql://host:3306/mydb") \
+    .option("dbtable", "orders") \
+    .option("user", "admin") \
+    .option("password", "secret") \
+    .option("driver", "com.mysql.cj.jdbc.Driver") \
+    .option("batchsize", "10000")       # rows per batch insert
+    .option("numPartitions", "8")       # parallel write connections
+    .mode("append") \
+    .save()
+```
+
+- ⚠️ **`numPartitions` controls DB connections** — don't set too high or you'll overwhelm the DB
+
+---
+
+## 3. Partitioning — The Most Critical Write Concept
+
+### `partitionBy` — Hive-style directory partitioning
+
+```python
+df.write \
+    .mode("overwrite") \
+    .partitionBy("year", "month", "region") \
+    .parquet("s3://bucket/orders/")
+
+# Output structure:
+# s3://bucket/orders/year=2024/month=01/region=US/part-0000.parquet
+# s3://bucket/orders/year=2024/month=01/region=EU/part-0001.parquet
+```
+
+**Partition column selection rules:**
+- Use **low-cardinality** columns (year, month, region, status)
+- Never partition by high-cardinality columns (user_id, order_id) — creates millions of tiny files
+- Ideal partition size: **128MB–1GB per partition file**
+
+---
+
+### `bucketBy` — Spark-managed bucketing (for joins)
+
+```python
+df.write \
+    .mode("overwrite") \
+    .bucketBy(64, "customer_id") \
+    .sortBy("order_date") \
+    .saveAsTable("orders_bucketed")
+```
+
+- Pre-shuffles data so joins on `customer_id` skip the shuffle stage entirely
+- Only works with **managed tables**, not raw file paths
+- Best when you repeatedly join two large tables on the same key
+
+---
+
+### `repartition` vs `coalesce` Before Writing
+
+```python
+# repartition — full shuffle, use to INCREASE or balance partitions
+df.repartition(100).write.parquet("s3://bucket/output/")
+
+# coalesce — no shuffle, use to REDUCE partitions (e.g., combine small files)
+df.coalesce(10).write.parquet("s3://bucket/output/")
+
+# Repartition by column — ensures same-key data lands in same file
+df.repartition("region").write.partitionBy("region").parquet("s3://bucket/output/")
+```
+
+| Scenario | Use |
+|---|---|
+| Too many small files | `coalesce(n)` before write |
+| Uneven partition sizes | `repartition(n)` before write |
+| Want one file per partition | `repartition(col).partitionBy(col)` |
+
+---
+
+## 4. Controlling Output File Count
+
+The **small files problem** is one of the most common production issues.
+
+```python
+# Bad: 1000s of tiny files (one per Spark partition)
+df.write.parquet("s3://bucket/output/")
+
+# Good: Control output file count
+df.coalesce(20).write.parquet("s3://bucket/output/")
+
+# Best for partitioned data: one file per partition key
+df.repartition("date") \
+  .write \
+  .partitionBy("date") \
+  .parquet("s3://bucket/output/")
+```
+
+### Writing a Single File (reports/exports)
+
+```python
+df.coalesce(1).write \
+    .mode("overwrite") \
+    .option("header", "true") \
+    .csv("s3://bucket/reports/daily_summary/")
+# ⚠️ coalesce(1) brings all data to one executor — only for small DataFrames
+```
+
+---
+
+## 5. Saving as Tables vs Paths
+
+```python
+# Write to a path (raw files)
+df.write.parquet("s3://bucket/raw/orders/")
+
+# Write as a managed table (Hive metastore / Glue catalog)
+df.write.saveAsTable("orders")  # Spark manages location
+
+# Write as an external table (you manage location)
+df.write \
+    .option("path", "s3://bucket/raw/orders/") \
+    .saveAsTable("orders_external")
+
+# Write using SQL-style
+df.createOrReplaceTempView("orders_temp")
+spark.sql("CREATE TABLE orders AS SELECT * FROM orders_temp")
+```
+
+---
+
+## 6. Advanced Write Options
+
+### Schema Merge (Parquet / Delta)
+
+```python
+df.write \
+    .option("mergeSchema", "true") \
+    .mode("append") \
+    .parquet("s3://bucket/output/")
+# Adds new columns to existing schema instead of failing
+```
+
+### Write with Compression Codec
+
+```python
+# Compression options: snappy (fast), gzip (smaller), zstd (best ratio), none
+df.write \
+    .option("compression", "zstd") \
+    .parquet("s3://bucket/output/")
+```
+
+### Max Records Per File
+
+```python
+df.write \
+    .option("maxRecordsPerFile", 1_000_000) \
+    .parquet("s3://bucket/output/")
+# Prevents any single file from growing too large
+```
+
+---
+
+## 7. Production-Grade Write Pattern
+
+```python
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder \
+    .appName("OrdersIngestion") \
+    .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
+    .config("spark.sql.parquet.compression.codec", "snappy") \
+    .getOrCreate()
+
+def write_partitioned_data(df, output_path: str, partition_cols: list):
+    """
+    Production-safe partitioned write with dynamic overwrite.
+    Overwrites only affected partitions, leaves others untouched.
+    """
+    df.repartition(*partition_cols) \
+      .write \
+      .mode("overwrite") \
+      .partitionBy(*partition_cols) \
+      .option("maxRecordsPerFile", 500_000) \
+      .option("compression", "snappy") \
+      .parquet(output_path)
+
+# Usage
+write_partitioned_data(
+    df=orders_df,
+    output_path="s3://bucket/processed/orders/",
+    partition_cols=["year", "month"]
+)
+```
+
+---
+
+## 8. Format Decision Guide
+
+```
+Need fast analytics queries?              → Parquet (default)
+Need ACID + upserts + time travel?        → Delta Lake
+Writing to MySQL / Postgres / RDS?        → JDBC
+Need human-readable output / debugging?  → JSON
+Downstream system needs spreadsheet?     → CSV
+Streaming output?                        → Delta / Kafka sink
+```
+
+---
+
+## Common Mistakes Cheatsheet
+
+| Mistake | Fix |
+|---|---|
+| `mode("overwrite")` wipes all partitions | Set `partitionOverwriteMode = dynamic` |
+| Millions of tiny files | `coalesce()` or `maxRecordsPerFile` |
+| Partitioning on high-cardinality column | Use low-cardinality cols only |
+| `coalesce(1)` on huge DataFrame | Causes OOM — only for small data |
+| JDBC write too slow | Increase `batchsize` + `numPartitions` |
+| Schema mismatch on append | Use `mergeSchema = true` |
