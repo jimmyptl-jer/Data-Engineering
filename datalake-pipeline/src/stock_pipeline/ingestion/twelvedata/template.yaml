@@ -1,0 +1,163 @@
+﻿AWSTemplateFormatVersion: "2010-09-09"
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Twelve Data Ingestion Lambda.
+  Fetches 1-minute time-series (OHLCV) bars once a day
+  and lands raw JSON payloads into the S3 Bronze layer.
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 512
+    Runtime: python3.14
+
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Development
+      - QA
+      - UAT
+      - Production
+
+  S3BucketName:
+    Type: String
+    Default: graywolf--data--lake
+    Description: >
+      S3 bucket the Lambda may write to (IAM policy only; the code
+      uses config.S3_BUCKET_NAME)
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(30 21 ? * MON-FRI *)"
+    Description: >
+      EventBridge schedule expression (UTC). 21:30 UTC is after the
+      16:00 ET close in both EDT and EST.
+
+  EnableSchedule:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  TwelveDataApiKey:
+    Type: String
+    NoEcho: true
+    Description: Twelve Data API key
+
+# ============================================================
+# CONDITIONS
+# ============================================================
+
+Conditions:
+  IsScheduleEnabled: !Equals
+    - !Ref EnableSchedule
+    - "true"
+
+# ============================================================
+# RESOURCES
+# ============================================================
+
+Resources:
+  TwelveDataIngestFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: !Sub "ingest-twelvedata-${EnvironmentName}"
+
+      Handler: app.lambda_handler
+
+      CodeUri: .
+
+      Description: Ingests Twelve Data time series into S3 Bronze
+
+      Architectures:
+        - x86_64
+
+      Environment:
+        Variables:
+          TWELVEDATA_API_KEY: !Ref TwelveDataApiKey
+
+      Tags:
+        Project: StockPipeline-DataLake
+        Environment: !Ref EnvironmentName
+        ManagedBy: AWS SAM
+        Layer: Ingestion
+        Source: TwelveData
+
+      Policies:
+        - Statement:
+            - Sid: S3BronzeWriteAccess
+
+              Effect: Allow
+
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:ListBucket
+
+              Resource:
+                - !Sub "arn:aws:s3:::${S3BucketName}"
+                - !Sub "arn:aws:s3:::${S3BucketName}/*"
+
+      Events:
+        ScheduledRun:
+          Type: Schedule
+
+          Properties:
+            Schedule: !Ref ScheduleExpression
+
+            Description: Scheduled Twelve Data ingestion run
+
+            Enabled: !If
+              - IsScheduleEnabled
+              - true
+              - false
+
+            # Symbols come from config.DEFAULT_STOCK_SYMBOLS
+            Input: "{}"
+
+  # ============================================================
+  # CLOUDWATCH LOG GROUP
+  # ============================================================
+
+  TwelveDataIngestLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${TwelveDataIngestFunction}"
+
+      RetentionInDays: 30
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+
+Outputs:
+  FunctionName:
+    Description: Twelve Data ingestion Lambda function name
+    Value: !Ref TwelveDataIngestFunction
+
+  FunctionArn:
+    Description: Twelve Data ingestion Lambda function ARN
+    Value: !GetAtt TwelveDataIngestFunction.Arn
+
+  LogGroupName:
+    Description: CloudWatch log group name
+    Value: !Ref TwelveDataIngestLogGroup

@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Alpha Vantage Data Lake Pipeline
+  Bronze → Silver → Gold ETL pipeline with incremental processing
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
+Globals:
+  Function:
+    Timeout: 900
+    MemorySize: 3008
+    Runtime: python3.14
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Development
+      - QA
+      - UAT
+      - Production
+
+  S3BucketName:
+    Type: String
+    Default: graywolf-stock-data-bucket
+
+  StockSymbols:
+    Type: String
+    Default: "IBM"
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 14 ? * MON-FRI *)"
+
+  EnableSchedule:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  AlphaVantageApiKey:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey1:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey2:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey3:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey4:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey5:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey6:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey7:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey8:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey9:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey10:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey11:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey12:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey13:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey14:
+    Type: String
+    NoEcho: true
+  AlphaVantageApiKey15:
+    Type: String
+    NoEcho: true
+
+# ============================================================
+# CONDITIONS
+# ============================================================
+
+Conditions:
+  IsScheduleEnabled: !Equals [!Ref EnableSchedule, "true"]
+
+# ============================================================
+# RESOURCES
+# ============================================================
+
+Resources:
+  # ----------------------------------------------------------
+  # SNS TOPIC — Alarm notifications
+  # ----------------------------------------------------------
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "stock-pipeline-alerts-${EnvironmentName}"
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+
+  # ----------------------------------------------------------
+  # S3 DATA LAKE BUCKET
+  # ----------------------------------------------------------
+
+  DatalakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+
+      VersioningConfiguration:
+        Status: Enabled
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+        - Key: DataClassification
+          Value: Internal
+
+      LifecycleConfiguration:
+        Rules:
+          - Id: BronzeToSilverTransition
+            Status: Enabled
+            Prefix: stock/bronze
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 180
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+              - TransitionInDays: 2555
+                StorageClass: DEEP_ARCHIVE
+
+          - Id: SilverToGoldTransition
+            Status: Enabled
+            Prefix: stock/silver
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 180
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+              - TransitionInDays: 2555
+                StorageClass: DEEP_ARCHIVE
+
+  # ----------------------------------------------------------
+  # LAMBDA FUNCTION
+  # ----------------------------------------------------------
+
+  StockPipelineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "stock-data-pipeline-${EnvironmentName}"
+
+      Handler: src.stock_pipeline.app.lambda_handler
+
+      CodeUri: .
+
+      Description: Alpha Vantage Data Lake Pipeline — Bronze → Silver → Gold ETL
+
+      Architectures:
+        - x86_64
+
+      Tags:
+        Project: AlphaVantage-DataLake
+        Environment: !Ref EnvironmentName
+        Owner: Jimmy Patel
+        ManagedBy: AWS SAM
+        DataClassification: Internal
+
+      Environment:
+        Variables:
+          ALPHA_VANTAGE_API_KEY: !Ref AlphaVantageApiKey
+          ALPHA_VANTAGE_API_KEY_1: !Ref AlphaVantageApiKey1
+          ALPHA_VANTAGE_API_KEY_2: !Ref AlphaVantageApiKey2
+          ALPHA_VANTAGE_API_KEY_3: !Ref AlphaVantageApiKey3
+          ALPHA_VANTAGE_API_KEY_4: !Ref AlphaVantageApiKey4
+          ALPHA_VANTAGE_API_KEY_5: !Ref AlphaVantageApiKey5
+          ALPHA_VANTAGE_API_KEY_6: !Ref AlphaVantageApiKey6
+          ALPHA_VANTAGE_API_KEY_7: !Ref AlphaVantageApiKey7
+          ALPHA_VANTAGE_API_KEY_8: !Ref AlphaVantageApiKey8
+          ALPHA_VANTAGE_API_KEY_9: !Ref AlphaVantageApiKey9
+          ALPHA_VANTAGE_API_KEY_10: !Ref AlphaVantageApiKey10
+          ALPHA_VANTAGE_API_KEY_11: !Ref AlphaVantageApiKey11
+          ALPHA_VANTAGE_API_KEY_12: !Ref AlphaVantageApiKey12
+          ALPHA_VANTAGE_API_KEY_13: !Ref AlphaVantageApiKey13
+          ALPHA_VANTAGE_API_KEY_14: !Ref AlphaVantageApiKey14
+          ALPHA_VANTAGE_API_KEY_15: !Ref AlphaVantageApiKey15
+          S3_BUCKET_NAME: !Ref DatalakeBucket
+
+      Policies:
+        - Statement:
+            - Sid: S3DataLakeAccess
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:ListBucket
+              Resource:
+                - !GetAtt DatalakeBucket.Arn
+                - !Sub "${DatalakeBucket.Arn}/*"
+
+      Events:
+        ScheduledRun:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: Scheduled ETL pipeline execution
+            Enabled: !If [IsScheduleEnabled, true, false]
+            Input: !Sub '{"stock_symbols": ["${StockSymbols}"]}'
+
+  # ----------------------------------------------------------
+  # CLOUDWATCH LOG GROUP (Explicit — sets retention)
+  # ----------------------------------------------------------
+
+  StockPipelineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StockPipelineFunction}"
+      RetentionInDays: 30
+
+  # ----------------------------------------------------------
+  # CLOUDWATCH ALARM — Lambda Errors
+  # ----------------------------------------------------------
+
+  StockPipelineErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "stock-pipeline-errors-${EnvironmentName}"
+      AlarmDescription: Triggers when the stock pipeline Lambda function errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref StockPipelineFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+
+  # ----------------------------------------------------------
+  # CLOUDWATCH ALARM — Lambda Duration (close to timeout)
+  # ----------------------------------------------------------
+
+  StockPipelineDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "stock-pipeline-duration-warning-${EnvironmentName}"
+      AlarmDescription: Triggers when pipeline execution exceeds 12 minutes (close to 15 min timeout)
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref StockPipelineFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 720000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: AlphaVantage-DataLake
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Owner
+          Value: Jimmy Patel
+        - Key: ManagedBy
+          Value: AWS SAM
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+
+Outputs:
+  StockPipelineFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt StockPipelineFunction.Arn
+
+  StockPipelineFunctionName:
+    Description: Lambda function name
+    Value: !Ref StockPipelineFunction
+
+  LogGroupName:
+    Description: CloudWatch Log Group for pipeline logs
+    Value: !Ref StockPipelineLogGroup
+
+  DatalakeBucketName:
+    Description: S3 data lake bucket name
+    Value: !Ref DatalakeBucket
+
+  AlertTopicArn:
+    Description: SNS topic for pipeline alerts — subscribe your email/Slack webhook here
+    Value: !Ref AlertTopic

@@ -2,9 +2,6 @@
 __pycache__/
 *.py[cod]
 *.pyo
-*.egg-info/
-dist/
-build/
 
 # Virtual Environment
 venv/
@@ -16,23 +13,15 @@ venv/
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
 
 # Local Data
 data/
 
 # Testing
 .pytest_cache/
-htmlcov/
 
 # Logs
 *.log
 
 # macOS
 .DS_Store
-
-# Spark
-metastore_db/
-derby.log
-spark-warehouse/
