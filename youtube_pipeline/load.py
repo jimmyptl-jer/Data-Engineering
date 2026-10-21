@@ -17,6 +17,13 @@ class YouTubeDataLoader:
     """
 
     def __init__(self, aws_access_key_id: str, aws_secret_access_key: str):
+        """
+        Initialize the YouTube Bronze loader with explicit AWS credentials.
+
+        Args:
+            aws_access_key_id (str): IAM access key used for S3 writes.
+            aws_secret_access_key (str): IAM secret key used for S3 writes.
+        """
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
 

@@ -52,6 +52,19 @@ class MassiveIngestion:
         loader,
         bucket_name: str,
     ):
+        """
+        Initialize the Massive (Polygon.io) ingestion service.
+
+        Args:
+            loader: S3 uploader used to land raw payloads into Bronze.
+            bucket_name (str): Target S3 bucket for the Bronze layer.
+
+        Attributes:
+            loader: Bronze uploader collaborator.
+            bucket_name: Bronze destination bucket.
+            client (RESTClient): Massive SDK REST client authenticated
+                with the key from ``get_key()`` (``MASSIVE_API_KEY``).
+        """
         self.loader = loader
         self.bucket_name = bucket_name
 
@@ -124,6 +137,28 @@ class MassiveIngestion:
         execution_start_time: datetime,
         run_id: str,
     ) -> Optional[Any]:
+        """
+        Ingest the Massive/Polygon ticker reference list into Bronze.
+
+        Calls the Massive REST client for the ticker universe filtered
+        by the given market/active/order/limit/sort parameters and lands
+        the raw response in the Bronze layer for this run.
+
+        Args:
+            datasource (str): Bronze ``source=`` partition value.
+            market (str): Market filter (e.g. ``stocks``).
+            active (bool): Whether to include only active tickers.
+            order (str): Sort order (e.g. ``asc`` / ``desc``).
+            limit (int): Maximum number of tickers to fetch.
+            sort (str): Field to sort the ticker list by.
+            execution_start_time (datetime): Run start time (used for the
+                ``ingestion_date=`` partition).
+            run_id (str): Unique batch identifier for the ``run_id=`` partition.
+
+        Returns:
+            Optional[Any]: The raw Massive ticker-list response payload, or
+                ``None`` when the request yields no data.
+        """
 
         logger.info(
             "[INGEST][MASSIVE_TICKERS] Starting | run_id=%s",

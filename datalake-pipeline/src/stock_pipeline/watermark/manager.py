@@ -280,7 +280,24 @@ class WatermarkManager:
     #   - Return True if changed (or no prior watermark), False if unchanged
     
     def compute_content_hash():
+        """
+        Placeholder for hash-based change detection (not yet implemented).
+
+        Planned contract (see the comment block above):
+            ``compute_content_hash(df, exclude_columns) -> str`` — SHA-256
+            over the business columns of a DataFrame, excluding technical
+            metadata such as ``processed_at`` and ``batch_id``.
+        """
         pass
     
     def hash_changed():
+        """
+        Placeholder for hash comparison against the stored watermark.
+
+        Planned contract (see the comment block above):
+            ``hash_changed(pipeline_name, dataset_name, new_hash) -> bool``
+            — ``True`` when the new content hash differs from the stored
+            watermark (or no watermark exists yet), ``False`` when the
+            dataset is unchanged and processing can be skipped.
+        """
         pass

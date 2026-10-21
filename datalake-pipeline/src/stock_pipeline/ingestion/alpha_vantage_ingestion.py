@@ -89,6 +89,21 @@ class AlphaVantageIngestion:
     """
 
     def __init__(self, extractor, loader, bucket_name: str):
+        """
+        Initialize the Alpha Vantage ingestion service.
+
+        Args:
+            extractor: Collaborator that fetches raw payloads from the
+                Alpha Vantage API (``fetch_from_api``-style interface).
+            loader: Collaborator that lands raw JSON payloads into the
+                S3 Bronze layer (``upload_raw_to_s3``-style interface).
+            bucket_name (str): Target S3 bucket for the Bronze layer.
+
+        Attributes:
+            extractor: API fetcher collaborator.
+            loader: S3 uploader collaborator.
+            bucket_name: Bronze destination bucket.
+        """
         self.extractor = extractor
         self.loader = loader
         self.bucket_name = bucket_name

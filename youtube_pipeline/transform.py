@@ -10,12 +10,32 @@ logger = logging.getLogger(__name__)
 class YouTubeDataTransformer:
 
     def __init__(self, spark: SparkSession):
+        """
+        Initialize the YouTube data transformer.
+
+        Args:
+            spark (SparkSession): Active Spark session used for the
+                Bronze → Silver DataFrame transformations.
+        """
         self.spark = spark
 
     def transform_csv_data(
         self,
         data_df: DataFrame,
     ) -> DataFrame:
+        """
+        Transform the trending-videos CSV dataset.
+
+        Selects and validates the required columns (video metadata,
+        engagement metrics such as views/likes/comments, and the
+        disabled-flag columns) from the raw trending dataset.
+
+        Args:
+            data_df (DataFrame): Raw trending-videos CSV DataFrame.
+
+        Returns:
+            DataFrame: Cleaned, validated trending-video records.
+        """
 
         logger.info("Starting YouTube data transformation.")
 
@@ -68,6 +88,19 @@ class YouTubeDataTransformer:
         self,
         data_df: DataFrame,
     ) -> DataFrame:
+        """
+        Transform the raw YouTube search JSON.
+
+        Explodes the ``items`` array of the API search response and
+        flattens it into one row per video (video_id, channel details,
+        publish timestamps, resource kind).
+
+        Args:
+            data_df (DataFrame): Raw Bronze search-response DataFrame.
+
+        Returns:
+            DataFrame: One row per video with flattened fields.
+        """
 
         logger.info("Starting YouTube JSON data transformation.")
 

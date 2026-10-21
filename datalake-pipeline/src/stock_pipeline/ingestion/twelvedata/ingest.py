@@ -32,6 +32,13 @@ class TwelveDataIngestion:
     """
 
     def __init__(self, bucket_name: str):
+        """
+        Initialize the Twelve Data ingestion helper.
+
+        Args:
+            bucket_name (str): Target S3 bucket that receives the raw
+                1-minute bar payloads in the Bronze layer.
+        """
         self.bucket_name = bucket_name
 
         logger.info(

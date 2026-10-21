@@ -528,6 +528,18 @@ class StockDataExtractor:
 class MassiveApiExtractor:
   
     def __init__(self, spark: SparkSession):
+        """
+        Initialize the Massive (Polygon.io) API extractor.
+
+        Args:
+            spark (SparkSession): Active Spark session used to read
+                raw Bronze JSON payloads from S3 into DataFrames.
+
+        Attributes:
+            spark: Shared Spark session handle.
+            bucket_name (str): Data-lake bucket name (config.S3_BUCKET_NAME),
+                used to build s3a:// Bronze object keys.
+        """
         self.spark = spark
         self.bucket_name = config.S3_BUCKET_NAME
 
@@ -562,6 +574,24 @@ class MassiveApiExtractor:
         execution_start_time: datetime,
         run_id: str,
     ) -> str:
+        """
+        Build the S3 Bronze partition key for a Massive dataset.
+
+        Constructs the immutable Bronze prefix
+        ``s3a://{bucket}/stock/bronze/source={datasource}/dataset={dataset}/
+        ingestion_date={YYYY-MM-DD}/run_id={run_id}/`` so every ingestion
+        run is isolated into its own partition.
+
+        Args:
+            datasource (str): Source partition value (e.g. ``massive``).
+            dataset (str): Dataset partition value (e.g. ``exchanges``).
+            execution_start_time (datetime): Run start time — only the
+                date part is used for the ``ingestion_date=`` partition.
+            run_id (str): Unique batch identifier for the ``run_id=`` partition.
+
+        Returns:
+            str: Fully-qualified s3a:// prefix for this Bronze run.
+        """
 
         ingestion_date = execution_start_time.strftime("%Y-%m-%d")
 
@@ -581,6 +611,25 @@ class MassiveApiExtractor:
         execution_start_time: datetime,
         batch_id: str,
     ) -> DataFrame:
+        """
+        Read a Massive Bronze partition into a Spark DataFrame.
+
+        Resolves the Bronze bucket key for the given run (via
+        ``_bronze_bucket_key``), verifies the path exists, and reads the
+        raw JSON payload into a DataFrame.
+
+        Args:
+            datasource (str): Source partition value (e.g. ``massive``).
+            dataset (str): Dataset partition value.
+            execution_start_time (datetime): Run start time (date part used).
+            batch_id (str): Batch identifier mapped to the ``run_id=`` partition.
+
+        Raises:
+            FileNotFoundError: If the Bronze partition path does not exist.
+
+        Returns:
+            DataFrame: Raw Bronze payload as a Spark DataFrame.
+        """
 
         bucket_key = self._bronze_bucket_key(
             datasource=datasource,

@@ -170,6 +170,21 @@ class AlphaVantageIngestion:
     """
 
     def __init__(self, extractor, loader, bucket_name: str):
+        """
+        Wire the ingestion pipeline together.
+
+        Args:
+            extractor: Collaborator that fetches raw payloads from the
+                Alpha Vantage API (``fetch_from_api``-style interface).
+            loader: Collaborator that lands raw JSON payloads into the
+                S3 Bronze layer (``upload_raw_to_s3``-style interface).
+            bucket_name (str): Target S3 bucket for the Bronze layer.
+
+        Attributes:
+            extractor: API fetcher collaborator.
+            loader: S3 uploader collaborator.
+            bucket_name: Bronze destination bucket.
+        """
         self.extractor = extractor
         self.loader = loader
         self.bucket_name = bucket_name
@@ -972,6 +987,20 @@ class DefaultS3Loader:
         bucket_name: str,
         bucket_key: str,
     ) -> str:
+        """
+        Upload a raw JSON payload to the S3 Bronze layer.
+
+        Serializes ``data`` to UTF-8 JSON and writes it to the given
+        bucket/key with ``s3_client.put_object``.
+
+        Args:
+            data: JSON-serializable API response payload.
+            bucket_name (str): Target S3 bucket.
+            bucket_key (str): Full S3 object key (including partitions).
+
+        Returns:
+            str: The S3 key the payload was written to.
+        """
 
         logger.info(
             "[LOADER][DEFAULT_S3_LOADER][UPLOAD_START] "

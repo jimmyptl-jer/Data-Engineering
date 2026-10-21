@@ -68,6 +68,13 @@ def create_spark_session() -> SparkSession:
 class YouTubePipeline:
 
     def __init__(self):
+        """
+        Initialize the YouTube pipeline.
+
+        Loads the YouTube API key, AWS credentials, and S3 bucket
+        settings from the environment (via ``youtube_pipeline.config``)
+        and prepares the pipeline components used by ``run()``.
+        """
 
         logger.info("Initializing YouTube pipeline configuration.")
 
@@ -94,6 +101,16 @@ class YouTubePipeline:
     # ========================================================
 
     def run(self):
+        """
+        Execute the full YouTube ETL pipeline.
+
+        Orchestration order:
+            1. Fetch the latest video search results from the YouTube
+               Data API v3 and land the raw JSON in S3 Bronze.
+            2. Re-read the Bronze payload into a Spark DataFrame.
+            3. Transform the JSON (and trending-CSV) sources.
+            4. Write the cleaned data to the S3 Silver layer.
+        """
 
         logger.info("Starting YouTube ETL pipeline.")
 
@@ -200,6 +217,17 @@ class YouTubePipeline:
 # ============================================================
 
 def lambda_handler(event, context):
+    """
+    AWS Lambda entry point for the YouTube pipeline.
+
+    Instantiates the pipeline, executes ``run()``, and logs the
+    wall-clock duration of the invocation for monitoring.
+
+    Args:
+        event: Lambda event payload (unused — configuration comes from
+            environment variables).
+        context: Lambda runtime context (unused).
+    """
 
     start_time = datetime.now(timezone.utc)
 

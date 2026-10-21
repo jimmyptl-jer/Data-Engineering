@@ -100,6 +100,18 @@ class YouTubeDataExtractor:
     """
 
     def __init__(self, spark: SparkSession):
+        """
+        Initialize the YouTube data extractor.
+
+        Args:
+            spark (SparkSession): Active Spark session used to read
+                Bronze JSON payloads from S3 into DataFrames.
+
+        Attributes:
+            spark: Shared Spark session handle.
+            bucket_name (str): Data-lake bucket (config.S3_BUCKET_NAME)
+                used to build s3a:// Bronze object keys.
+        """
         self.spark = spark
         self.bucket_name = config.S3_BUCKET_NAME
 

@@ -27,6 +27,16 @@ api_key = random.choices(ALPHA_VANTAGE_API_KEYS, k=len(ALPHA_VANTAGE_API_KEYS))
 
 class APIKeyManager:
     def __init__(self):
+        """
+        Initialize the Alpha Vantage API key manager.
+
+        Validates that at least one ``ALPHA_VANTAGE_API_KEY*`` environment
+        variable (the base key or the ``_1`` … ``_15`` rotation pool) is
+        populated.
+
+        Raises:
+            ValueError: If no valid Alpha Vantage API key is configured.
+        """
         if not api_key:
             raise ValueError(
                 "No valid Alpha Vantage API keys found. Check that at least "
@@ -45,6 +55,16 @@ class APIKeyManager:
         logger.info("[STEP UTIL][APIKEY_INIT] APIKeyManager initialized with %d valid key(s).", len(self.api_keys))
 
     def get_key(self):
+        """
+        Issue one API key from the rotation pool at random.
+
+        Random selection spreads requests across the configured
+        ``ALPHA_VANTAGE_API_KEY*`` pool to stay within the provider's
+        free-tier rate limits.
+
+        Returns:
+            str: One API key from the configured pool.
+        """
         key = random.choice(self.api_keys)
         logger.debug("Issued API key ending in: ...%s", key[-4:] if len(key) > 4 else "****")
         return key
