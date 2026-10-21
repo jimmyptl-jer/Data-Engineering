@@ -166,16 +166,18 @@ class StockDataExtractor:
 
     def _bronze_bucket_key(
         self,
-        datasource: str, 
-        dataset: str, 
+        datasource: str,
+        dataset: str,
         execution_start_time: datetime,
-        run_id:str
-        ) -> str:
+        run_id: str,
+    ) -> str:
         """
         Build fully qualified S3 URI prefix for Bronze layer partitions.
 
         Args:
-            dataset: Dataset folder name (e.g. 'daily_time_series').                                                                    
+            datasource: Source system folder name (e.g. 'alphavantage', 'massive').
+            dataset: Dataset folder name (e.g. 'daily_time_series').
+            run_id: Pipeline batch/run identifier used in the partition path.                                                                    
             execution_start_time: Execution start timestamp for partitioning.
 
         Returns:
@@ -204,6 +206,7 @@ class StockDataExtractor:
         Build fully qualified S3 URI prefix for Silver layer partitions.
 
         Args:
+            datasource: Source system folder name (e.g. 'alphavantage').
             dataset: Dataset folder name (e.g. 'daily_time_series').
             data_format: Storage format extension ('csv' or 'parquet').
             execution_start_time: Execution start timestamp for partitioning.
@@ -303,8 +306,10 @@ class StockDataExtractor:
         Extract raw daily time-series JSON files from Bronze S3 partition into a Spark DataFrame.
 
         Args:
+            datasource: Source system folder name (e.g. 'alphavantage').
             dataset: Dataset partition folder name.
             execution_start_time: Execution start timestamp.
+            batch_id: Pipeline batch identifier used as the Bronze run_id partition.
 
         Returns:
             DataFrame: Spark DataFrame matching `stock_schema_daily`.
@@ -344,8 +349,10 @@ class StockDataExtractor:
         Extract raw company overview JSON files from Bronze S3 partition into a Spark DataFrame.
 
         Args:
+            datasource: Source system folder name (e.g. 'alphavantage').
             dataset: Dataset partition folder name.
             execution_start_time: Execution start timestamp.
+            batch_id: Pipeline batch identifier used as the Bronze run_id partition.
 
         Returns:
             DataFrame: Spark DataFrame matching `stock_overview_schema`.
@@ -379,20 +386,22 @@ class StockDataExtractor:
 
     def extract_silver_daily_data_parquet(
         self,
-        dataset: str, 
+        datasource: str,
+        dataset: str,
         execution_start_time: datetime,
     ) -> DataFrame:
         """
         Extract processed daily time-series Parquet files from Silver S3 layer.
 
         Args:
+            datasource: Source system folder name (e.g. 'alphavantage').
             dataset: Dataset partition folder name.
             execution_start_time: Execution start timestamp.
 
         Returns:
             DataFrame: Spark DataFrame loaded from Parquet.
         """
-        bucket_key = self._silver_bucket_key(dataset, "parquet", execution_start_time)
+        bucket_key = self._silver_bucket_key(datasource, dataset, "parquet", execution_start_time)
         logger.info("[EXTRACT][SILVER_DAILY_PARQUET] Reading Parquet files from: %s", bucket_key)
 
         if not self._path_exists(bucket_key):
@@ -449,19 +458,20 @@ class StockDataExtractor:
             raise
 
     def extract_silver_overview_data_parquet(
-        self, dataset: str, execution_start_time: datetime,
+        self, datasource: str, dataset: str, execution_start_time: datetime,
     ) -> DataFrame:
         """
         Extract processed company overview Parquet files from Silver S3 layer.
 
         Args:
+            datasource: Source system folder name (e.g. 'alphavantage').
             dataset: Dataset partition folder name.
             execution_start_time: Execution start timestamp.
 
         Returns:
             DataFrame: Spark DataFrame loaded from Parquet.
         """
-        bucket_key = self._silver_bucket_key(dataset, "parquet", execution_start_time)
+        bucket_key = self._silver_bucket_key(datasource, dataset, "parquet", execution_start_time)
         logger.info("[EXTRACT][SILVER_OVERVIEW_PARQUET] Reading Parquet files from: %s", bucket_key)
 
         if not self._path_exists(bucket_key):
@@ -478,12 +488,13 @@ class StockDataExtractor:
             raise
 
     def extract_silver_overview_data_csv(
-        self, dataset: str, data_format: str, execution_start_time: datetime,
+        self, datasource: str, dataset: str, data_format: str, execution_start_time: datetime,
     ) -> DataFrame:
         """
         Extract processed company overview CSV files from Silver S3 layer.
 
         Args:
+            datasource: Source system folder name (e.g. 'alphavantage').
             dataset: Dataset partition folder name.
             data_format: Storage format string ('csv').
             execution_start_time: Execution start timestamp.
@@ -491,7 +502,7 @@ class StockDataExtractor:
         Returns:
             DataFrame: Spark DataFrame loaded from CSV.
         """
-        bucket_key = self._silver_bucket_key(dataset, data_format, execution_start_time)
+        bucket_key = self._silver_bucket_key(datasource, dataset, data_format, execution_start_time)
         logger.info("[EXTRACT][SILVER_OVERVIEW_CSV] Reading CSV files from: %s", bucket_key)
 
         if not self._path_exists(bucket_key):

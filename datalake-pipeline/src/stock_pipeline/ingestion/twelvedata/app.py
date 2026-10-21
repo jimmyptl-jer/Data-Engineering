@@ -1,4 +1,4 @@
-﻿"""
+"""
 Twelve Data Ingestion Lambda — Entry Point.
 
 SAM Handler: app.lambda_handler

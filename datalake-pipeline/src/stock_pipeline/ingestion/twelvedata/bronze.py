@@ -1,4 +1,4 @@
-﻿"""
+"""
 Bronze Layer Writer.
 
 Every raw API payload lands in S3 under one layout, which the transform job

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Twelve Data Ingestion — API Key.
 
 The key comes from the TWELVEDATA_API_KEY environment variable (set on the

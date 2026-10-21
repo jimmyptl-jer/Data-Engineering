@@ -549,6 +549,10 @@ def silver_transform_daily_timeseries(
         # STEP 18: ROW COUNT METRICS
         # ========================================================
 
+        total_in = stock_df.count()
+        valid_count = total_in - invalid_record_count
+        total_out = valid_stock_df.count()
+
         logger.info(
             "[ALPHAVANTAGE][DAILY][METRICS] "
             "total_in=%d | total_out=%d | valid=%d | invalid=%d",

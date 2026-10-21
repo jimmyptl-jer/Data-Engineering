@@ -1,16 +1,18 @@
 # Data Engineering — Datalake Pipeline
 
-A serverless data lake pipeline built with **Python**, **PySpark**, and **AWS** that ingests, transforms, and stores data from the **Alpha Vantage Stock API** and **YouTube Data API** following the **Bronze → Silver** medallion architecture.
+A production-style **serverless data lake** built with **Python**, **PySpark 4.0**, and **AWS** (S3 + Lambda + EventBridge + SAM) that ingests financial market and video data from **five external APIs** — Alpha Vantage, Massive (Polygon.io), Finnhub, Twelve Data, and the YouTube Data API — following the **Bronze → Silver → Gold** medallion architecture, with watermark-based incremental processing, explicit PySpark schemas, data-quality validation and quarantine, and an S3-backed state manager.
+
+> 📘 **How to run it locally** — see the runbook: [`datalake-pipeline/notes/running_pipeline_locally.md`](datalake-pipeline/notes/running_pipeline_locally.md). Project knowledge and design notes are indexed in [`datalake-pipeline/notes/INDEX.md`](datalake-pipeline/notes/INDEX.md).
 
 ---
 
 ## Table of Contents
 
+> 📖 **The detailed project reference is [`datalake-pipeline/README.md`](datalake-pipeline/README.md)** — data sources, module reference, data schemas, deployment, testing, troubleshooting. This top-level README is the quick overview.
+
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [Pipelines](#pipelines)
-  - [Stock Pipeline](#stock-pipeline)
-  - [YouTube Pipeline](#youtube-pipeline)
 - [ETL Workflow](#etl-workflow)
 - [Tech Stack](#tech-stack)
 - [Setup & Installation](#setup--installation)
@@ -24,59 +26,72 @@ A serverless data lake pipeline built with **Python**, **PySpark**, and **AWS** 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    DATA SOURCES                         │
-│                                                         │
-│   Alpha Vantage API          YouTube Data API v3        │
-│   (Weekly Time Series)       (Video Search)             │
-└────────┬─────────────────────────────┬──────────────────┘
-         │                             │
-         ▼                             ▼
-┌─────────────────────────────────────────────────────────┐
-│              EXTRACT  (extract.py)                      │
-│                                                         │
-│   fetch_from_api()  →  Raw JSON from APIs               │
-│   extract_data()    →  Read Bronze S3 into Spark DF     │
-└────────┬─────────────────────────────┬──────────────────┘
-         │                             │
-         ▼                             ▼
-┌─────────────────────────────────────────────────────────┐
-│                LOAD — Bronze Layer  (load.py)           │
-│                                                         │
-│   upload_raw_to_s3()  →  Raw JSON → S3 Bronze           │
-│                                                         │
-│   s3://graywolf--data--lake/stock/source=alphavantage/  │
-│   s3://graywolf--data--lake/youtube/year=.../            │
-└────────┬─────────────────────────────┬──────────────────┘
-         │                             │
-         ▼                             ▼
-┌─────────────────────────────────────────────────────────┐
-│             TRANSFORM  (transform.py)                   │
-│                                                         │
-│   Stock:   transform_weekly_timeseries()                │
-│            - Explode weekly time series                  │
-│            - Cast types, fill nulls, round prices        │
-│            - Derive: weekly_change, market_movement      │
-│            - Add: year, month, week_number               │
-│                                                         │
-│   YouTube: transform_json_data()                        │
-│            - Explode items array                         │
-│            - Select: video_id, channel, publish_time     │
-│                                                         │
-│            transform_csv_data()                         │
-│            - Select and validate trending dataset        │
-└────────┬─────────────────────────────┬──────────────────┘
-         │                             │
-         ▼                             ▼
-┌─────────────────────────────────────────────────────────┐
-│              Silver Layer (S3)                          │
-│                                                         │
-│   s3://graywolf--data--lake/silver/stock_data/           │
-│   s3://graywolf--data--lake/silver/youtube/              │
-│                                                         │
-│   Format: CSV with headers                              │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                               DATA SOURCES                               │
+│                                                                          │
+│Alpha Vantage API                Massive (Polygon.io)                     │
+│  • Daily OHLCV time series        • Exchanges, Aggregates                │
+│  • Company Overview               • Stock Overview, Dividends            │
+│                                                                          │
+│Finnhub API                      Twelve Data API                          │
+│  • Ticker Reference                • 1-min bars (SAM Lambda)             │
+│                                                                          │
+│YouTube Data API v3  (separate youtube_pipeline)                          │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│INGESTION  (ingestion/ — requests + boto3)                                │
+│                                                                          │
+│ingest() per symbol × endpoint  →  upload_raw_to_s3()                     │
+│raw JSON payloads landed immutably in S3                                  │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│BRONZE LAYER  (raw JSON)                                                  │
+│                                                                          │
+│stock/bronze/source={ds}/dataset={d}/ingestion_date=…/run_id=…/           │
+│youtube/year=YYYY/month=MM/day=DD/hour=HH/                                │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│TRANSFORM  (transform/ — PySpark, explicit StructType schemas)            │
+│                                                                          │
+│daily.py  •  weekly.py  •  overview.py                                    │
+│exchanges.py  •  stock_tickers.py  •  stock_overview_massive.py           │
+│                                                                          │
+│WatermarkManager (S3 watermark/) — incremental processing:                │
+│  • date-based watermark  (daily time series)                             │
+│  • hash-based detection  (company overview)                              │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│SILVER LAYER  (cleaned, validated, enriched — CSV + Parquet)              │
+│                                                                          │
+│stock/silver/datasource={ds}/dataset={d}/                                 │
+│             year=YYYY/month=MM/format={csv|parquet}/                     │
+│silver/youtube/source=youtube_api/                                        │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│GOLD LAYER  (joined, analytics-ready)                                     │
+│                                                                          │
+│Massive stock overview  ⋈  Alpha Vantage company overview                 │
+│→  company_dataset                                                        │
+│stock/gold/datasource=stock/dataset=company_dataset/                      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+All paths are relative to `s3://graywolf--data--lake/`. See [`datalake-pipeline/README.md`](datalake-pipeline/README.md) for the module-by-module reference and [`datalake-pipeline/notes/running_pipeline_locally.md`](datalake-pipeline/notes/running_pipeline_locally.md) to run it.
 
 ---
 

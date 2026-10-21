@@ -1,4 +1,4 @@
-﻿"""
+"""
 Twelve Data Ingestion — API Client.
 
 `fetch_endpoint()` makes one request for one symbol and API function and

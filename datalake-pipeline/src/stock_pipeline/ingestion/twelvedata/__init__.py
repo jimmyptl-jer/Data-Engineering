@@ -1,4 +1,4 @@
-﻿"""
+"""
 Twelve Data Ingestion Lambda Package.
 
 Standalone Lambda that ingests 1-minute time-series bars from the

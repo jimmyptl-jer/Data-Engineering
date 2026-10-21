@@ -1,4 +1,4 @@
-﻿"""
+"""
 Twelve Data Ingestion — Symbol × Endpoint Loop.
 
 `TwelveDataIngestion.ingest_symbols()` fetches every endpoint in

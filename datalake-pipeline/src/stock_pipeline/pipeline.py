@@ -1159,7 +1159,7 @@ class StockPipeline:
 
     def _process_overview_dataset(
         self,
-        datasource,
+        datasource: str,
         execution_start_time: datetime,
         batch_id: str,
     ) -> bool:
@@ -1283,14 +1283,16 @@ class StockPipeline:
         try:
             daily_parquet = (
                 self.extractor.extract_silver_daily_data_parquet(
-                    daily_dataset,
+                    datasource="alphavantage",
+                    dataset=daily_dataset,
                     execution_start_time=execution_start_time,
                 )
             )
 
             overview_parquet = (
                 self.extractor.extract_silver_overview_data_parquet(
-                    overview_dataset,
+                    datasource="alphavantage",
+                    dataset=overview_dataset,
                     execution_start_time=execution_start_time,
                 )
             )
@@ -1325,16 +1327,18 @@ class StockPipeline:
 
             daily_csv = (
                 self.extractor.extract_silver_daily_data_csv(
-                    daily_dataset,
-                    "csv",
+                    datasource="alphavantage",
+                    dataset=daily_dataset,
+                    data_format="csv",
                     execution_start_time=execution_start_time,
                 )
             )
 
             overview_csv = (
                 self.extractor.extract_silver_overview_data_csv(
-                    overview_dataset,
-                    "csv",
+                    datasource="alphavantage",
+                    dataset=overview_dataset,
+                    data_format="csv",
                     execution_start_time=execution_start_time,
                 )
             )
@@ -1435,8 +1439,9 @@ class StockPipeline:
                 Whether the pipeline should perform a full load.
 
         Returns:
-            list[dict]:
-                Pipeline execution results.
+            dict:
+                Pipeline execution results summary (batch id, duration,
+                per-source ingestion results, silver processing status).
         """
 
         batch_id = (
@@ -1457,15 +1462,15 @@ class StockPipeline:
 
         try:
 
-            # # ========================================================
-            # # STEP 1 — ALPHA VANTAGE → BRONZE
-            # # ========================================================
+            # ========================================================
+            # STEP 1 — ALPHA VANTAGE → BRONZE
+            # ========================================================
 
-            # logger.info(
-            #     "[PIPELINE][STEP 1/8] Alpha Vantage API → Bronze | "
-            #     "batch_id=%s",
-            #     batch_id,
-            # )
+            logger.info(
+                "[PIPELINE][STEP 1/8] Alpha Vantage API → Bronze | "
+                "batch_id=%s",
+                batch_id,
+            )
 
             results_alphavantage = (
                 self._ingest_from_alphavantage_api(
@@ -1633,9 +1638,11 @@ class StockPipeline:
             #     stocks_list_processing,
             # )
 
-            # # ========================================================
-            # # STEP 7 — SILVER → GOLD
-            # # ========================================================
+            # ========================================================
+            # STEP 7 — SILVER → GOLD
+            # Join Massive stock overview + Alpha Vantage company overview
+            # into the Gold company_dataset (CSV).
+            # ========================================================
             
             stock_overview_csv = (
                 self.extractor.extract_silver_daily_data_csv(

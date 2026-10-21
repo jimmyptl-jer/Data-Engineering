@@ -1,4 +1,4 @@
-﻿"""
+"""
 Twelve Data Ingestion — Configuration.
 
 Settings are hardcoded here; the only environment variable is the API key

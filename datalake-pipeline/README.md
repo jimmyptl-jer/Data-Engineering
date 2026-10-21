@@ -1,6 +1,8 @@
-# Alpha Vantage Data Lake Pipeline
+# Stock Market Data Lake Pipeline
 
-> **Enterprise Medallion Architecture** — A production-grade Bronze → Silver → Gold data lake pipeline built with PySpark, AWS S3, AWS Lambda, and Alpha Vantage market data APIs.
+> **Enterprise Medallion Architecture** — A production-grade Bronze → Silver → Gold data lake pipeline built with PySpark, AWS S3, AWS Lambda, and five market-data APIs (Alpha Vantage, Massive/Polygon.io, Finnhub, Twelve Data, YouTube).
+
+> 📘 **How to run it locally** — full step-by-step runbook: [`notes/running_pipeline_locally.md`](notes/running_pipeline_locally.md). Project knowledge and design notes are indexed in [`notes/INDEX.md`](notes/INDEX.md).
 
 Part of the **90-Day Data Engineering Roadmap**.
 
@@ -9,6 +11,7 @@ Part of the **90-Day Data Engineering Roadmap**.
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [Data Sources](#data-sources)
 - [Project Structure](#project-structure)
 - [Technology Stack](#technology-stack)
 - [Prerequisites](#prerequisites)
@@ -46,11 +49,18 @@ Part of the **90-Day Data Engineering Roadmap**.
   - [Hash-Based Change Detection (Company Overview)](#hash-based-change-detection-company-overview)
 - [Watermark Storage](#watermark-storage)
 - [Pipeline Execution Flow](#pipeline-execution-flow)
+- [Data Schemas](#data-schemas)
 - [Implementation Deep-Dive](#implementation-deep-dive)
 - [AWS Lambda Deployment](#aws-lambda-deployment)
+- [Twelve Data Ingestion (SAM Lambda)](#twelve-data-ingestion-sam-lambda)
+- [YouTube Pipeline](#youtube-pipeline)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
 - [Master Enterprise Architecture Diagram](#master-enterprise-architecture-diagram)
 - [Current Status](#current-status)
 - [Roadmap](#roadmap)
+- [License](#license)
+- [Author](#author)
 
 ---
 
@@ -83,6 +93,22 @@ Alpha Vantage API
 
 ---
 
+## Data Sources
+
+Five external APIs feed the lake. Each has a dedicated ingestion module that fetches raw JSON and lands it immutably in Bronze:
+
+| Source | Data ingested | Ingestion module | Env variable(s) |
+|---|---|---|---|
+| [Alpha Vantage](https://www.alphavantage.co/documentation/) | `TIME_SERIES_DAILY` (daily OHLCV), `OVERVIEW` (company fundamentals) | [`alpha_vantage_ingestion.py`](src/stock_pipeline/ingestion/alpha_vantage_ingestion.py) | `ALPHA_VANTAGE_API_KEY` + `_1`…`_15` pool |
+| [Massive (Polygon.io)](https://polygon.io/) | Exchanges, aggregates (1-min bars), stock overview, splits, dividends, tickers | [`massive_ingestion.py`](src/stock_pipeline/ingestion/massive_ingestion.py) | `MASSIVE_API_KEY` |
+| [Finnhub](https://finnhub.io/) | Ticker reference (symbol universe) | [`finnhub_ingestion.py`](src/stock_pipeline/ingestion/finnhub_ingestion.py) | `FINNHUB_API_KEY` |
+| [Twelve Data](https://twelvedata.com/) | 1-minute bars per symbol | [`ingestion/twelvedata/`](src/stock_pipeline/ingestion/twelvedata/) — standalone SAM Lambda | `TWELVEDATA_API_KEY` |
+| [YouTube Data API v3](https://developers.google.com/youtube/v3/) | Video search results + trending videos CSV | [`youtube_pipeline/`](../youtube_pipeline/) (repo root) | `YOUTUBE_API_KEY` |
+
+> All providers offer free tiers. Alpha Vantage's free key allows ~25 requests/day — hence the **16-key rotation pool** managed by `APIKeyManager` in [`utils.py`](src/stock_pipeline/utils.py).
+
+---
+
 ## Project Structure
 
 ```text
@@ -96,41 +122,51 @@ datalake-pipeline/
 │       ├── app.py                    # Entry Point: AWS Lambda handler & local CLI runner
 │       ├── pipeline.py               # Core Orchestrator: StockPipeline class & Spark helpers
 │       ├── config.py                 # Centralized configuration & environment settings
-│       ├── utils.py                  # API Key Manager & rotation utilities
-│       ├── extract.py                # PySpark explicit schemas & Bronze/Silver data extractors
+│       ├── utils.py                  # API Key Manager & 16-key rotation utilities
+│       ├── extract.py               # PySpark explicit schemas & Bronze/Silver data extractors
 │       ├── load.py                   # Low-level boto3 S3 Bronze layer uploader
 │       ├── database.py               # Placeholder for relational DB integration
 │       │
 │       ├── ingestion/                # Raw API Ingestion Layer (API → S3 Bronze)
 │       │   ├── __init__.py
-│       │   ├── alpha_vantage_ingestion.py  # Alpha Vantage market data & fundamental ingestion
-│       │   ├── massive_ingestion.py        # Massive (Polygon.io) market data & reference ingestion
-│       │   └── finnhub_ingestion.py        # Finnhub stock ticker reference data ingestion
+│       │   ├── alpha_vantage_ingestion.py   # Alpha Vantage market data & fundamentals
+│       │   ├── massive_ingestion.py         # Massive (Polygon.io) data & reference ingestion
+│       │   ├── finnhub_ingestion.py         # Finnhub ticker reference ingestion
+│       │   │
+│       │   ├── alpha_vantage/      # Per-source SAM Lambda apps (template.yaml + handlers)
+│       │   ├── massive/             #   tickers.py, stock_overview.py, splits.py, …
+│       │   ├── finnhub/              #   ticker reference Lambda
+│       │   └── twelvedata/          # 1-min bars Lambda: app.py, client.py, bronze.py,
+│       │                             #   ingest.py, keys.py, config.py, template.yaml
 │       │
 │       ├── transform/                # Bronze-to-Silver PySpark Transformation Package
 │       │   ├── __init__.py
 │       │   ├── daily.py               # Daily time series (watermark, DQ assertions, rolling aggs, lag)
 │       │   ├── weekly.py              # Weekly time series (DQ rules, metrics)
-│       │   ├── overview.py            # Company overview fundamental reference data
-│       │   └── exchanges.py           # Massive exchanges reference data
+│       │   ├── overview.py            # Alpha Vantage company overview (hash-based detection)
+│       │   ├── stock_overview_massive.py   # Massive stock overview
+│       │   ├── exchanges.py           # Massive exchanges reference data
+│       │   └── stock_tickers.py       # Finnhub ticker reference
 │       │
 │       └── watermark/                # Reusable Watermark State Manager
 │           ├── __init__.py
-│           ├── config.py             # Watermark S3 paths
-│           └── manager.py            # WatermarkManager class (Hadoop FileSystem API)
+│           ├── config.py             # Watermark S3 paths (s3a://graywolf--data--lake/watermark/)
+│           ├── manager.py            # WatermarkManager class (Hadoop FileSystem API)
+│           └── utils.py               # Watermark helper utilities
 │
+├── ingestion/                         # Top-level per-source SAM deployment folders
 ├── tests/
-│   └── test_stock_config.py          # Configuration tests
-│
-├── data/                             # Local data (gitignored)
-│   ├── raw/
-│   └── processed/
+│   └── test_stock_config.py          # Configuration unit tests
+├── notes/                             # Project knowledge base (“brain”) — see notes/INDEX.md
 │
 ├── .env.example                      # Environment variable template
 ├── .gitignore
-├── requirements.txt                  # Production dependencies
-├── requirements-dev.txt              # Dev/test dependencies
-└── template.yaml                     # AWS SAM Infrastructure as Code template
+├── requirements.txt                  # Pinned production dependencies
+├── requirements-dev.txt              # Dev/test dependencies (pytest, flake8, black)
+├── template.yaml                     # AWS SAM template — pipeline Lambda + EventBridge schedule
+├── samconfig.toml                    # SAM deploy defaults
+├── deploy.sh                         # One-command build + deploy
+└── README.md                         # This file
 ```
 
 ---
@@ -155,10 +191,14 @@ datalake-pipeline/
 
 ## Prerequisites
 
-- **Python 3.9+**
-- **Java 11+** (required by PySpark)
-- **AWS Account** with S3 access
-- **Alpha Vantage API key** (free tier: [alphavantage.co](https://www.alphavantage.co/support/#api-key))
+| Requirement | Notes |
+|---|---|
+| **Python 3.9+** | 3.12 used in development — matches pinned `pyspark==4.0.4` |
+| **Java 11 or 17** | required by local PySpark (`java -version` to check) |
+| **AWS account** | S3 bucket (default `graywolf--data--lake`) readable/writable by your IAM user |
+| **API keys** | only for the sources you enable — see [Data Sources](#data-sources) |
+| **Internet access** | first Spark run fetches `hadoop-aws` via Ivy (cached in `~/.ivy2`) |
+| **pytest / flake8 / black** | installed via `requirements-dev.txt` for development |
 
 ---
 
@@ -186,25 +226,36 @@ pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Edit `.env` with your credentials (full reference in the [runbook](notes/running_pipeline_locally.md)):
 
 ```env
-# Alpha Vantage
-ALPHA_VANTAGE_API_KEY=your_key_here
+# ── Data source keys — set only the ones you enable ──────────────
+ALPHA_VANTAGE_API_KEY=your_key          # daily OHLCV + company overview
+MASSIVE_API_KEY=your_key                # exchanges, aggregates, overview, dividends
+FINNHUB_API_KEY=your_key                # ticker reference
+TWELVEDATA_API_KEY=your_key             # 1-min bars Lambda only
 
-# AWS
+# ── AWS ────────────────────────────────────────────────────────────
 AWS_ACCESS_KEY_ID=your_aws_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret
-S3_BUCKET_NAME=your-s3-bucket-name
+S3_BUCKET_NAME=graywolf--data--lake     # optional — this is the default
 ```
 
-The pipeline supports up to 16 API keys for rotation (`ALPHA_VANTAGE_API_KEY` through `ALPHA_VANTAGE_API_KEY_15`).
+Rules:
+
+- Up to **16 Alpha Vantage keys** are supported for rotation (`ALPHA_VANTAGE_API_KEY` through `ALPHA_VANTAGE_API_KEY_15`).
+- `python-dotenv` loads `.env` from your **current working directory** — run from `datalake-pipeline/`.
+- Keys are read **at import time**; restart the process after changing them.
+- **Never commit `.env`** — `.gitignore` already excludes it.
+- The YouTube pipeline (repo root) additionally needs `YOUTUBE_API_KEY` and `S3_BUCKET_NAME` (no default there).
 
 ### 3. Run Locally
 
 ```bash
 python -m src.stock_pipeline.app
 ```
+
+> 📘 The **complete walkthrough** (all `.env` variables, active vs. commented-out pipeline steps, S3 output layout, troubleshooting, and a no-AWS smoke test) lives in [`notes/running_pipeline_locally.md`](notes/running_pipeline_locally.md).
 
 ---
 
@@ -523,6 +574,9 @@ Handles fetching raw data from external market APIs and landing JSON files into 
 | [`alpha_vantage_ingestion.py`](src/stock_pipeline/ingestion/alpha_vantage_ingestion.py) | Alpha Vantage REST | Daily Time Series, Company Overview |
 | [`massive_ingestion.py`](src/stock_pipeline/ingestion/massive_ingestion.py) | Massive (Polygon.io) | Exchanges, Aggregates/OHLCV, Splits, Dividends, Stock Overview |
 | [`finnhub_ingestion.py`](src/stock_pipeline/ingestion/finnhub_ingestion.py) | Finnhub REST | Ticker Reference / Stock symbols list |
+| [`twelvedata/`](src/stock_pipeline/ingestion/twelvedata/) (SAM Lambda) | Twelve Data REST | 1-minute bars per symbol |
+
+Each source additionally ships its own SAM Lambda app for deployment — see [AWS Lambda Deployment](#aws-lambda-deployment).
 
 ---
 
@@ -556,6 +610,8 @@ Transforms raw Bronze DataFrames into cleaned, validated, enriched Silver DataFr
 | [`overview.py`](src/stock_pipeline/transform/overview.py) | Company Overview | 52 business columns selection, snake_case mapping, fake null normalization, default value imputation, explicit type casting |
 | [`weekly.py`](src/stock_pipeline/transform/weekly.py) | Weekly Time Series | Weekly OHLCV flattening, DQ validation assertions, metric enrichment (weekly_change %, Bull/Bear) |
 | [`exchanges.py`](src/stock_pipeline/transform/exchanges.py) | Massive Exchanges | Reference data cleaning, code standardization (MIC, type), validation reason tagging |
+| [`stock_overview_massive.py`](src/stock_pipeline/transform/stock_overview_massive.py) | Massive Stock Overview | Polygon company reference data → Silver (input to the Gold join) |
+| [`stock_tickers.py`](src/stock_pipeline/transform/stock_tickers.py) | Finnhub Ticker Reference | Symbol universe cleaning & standardization |
 
 ---
 
@@ -594,25 +650,90 @@ Centralized pipeline parameters, Alpha Vantage endpoint definitions, watermark s
 
 ### Bronze Layer
 
-**Path:** `s3://graywolf--data--lake/stock/bronze/source=alphavantage/`
+**Path:** `s3://graywolf--data--lake/stock/bronze/source={datasource}/dataset={dataset}/ingestion_date=YYYY-MM-DD/run_id={batch}/`
 
-Raw, immutable landing zone partition by `year/month/day/hour/minute`.
+Raw, immutable landing zone — one JSON object per symbol × endpoint × run, partitioned by source, dataset, ingestion date, and batch ID.
 
 ---
 
 ### Silver Layer
 
-**Path:** `s3://graywolf--data--lake/stock/silver/source=alphavantage/`
+**Path:** `s3://graywolf--data--lake/stock/silver/datasource={datasource}/dataset={dataset}/year=YYYY/month=MM/format={csv|parquet}/`
 
-Cleaned, typed, partitioned, enriched dataset written in CSV and Parquet.
+Cleaned, typed, validated, enriched datasets written in dual format (CSV + Parquet), partitioned by year/month.
 
 ---
 
 ### Gold Layer
 
-**Path:** `s3://graywolf--data--lake/stock/gold/source=alphavantage/`
+**Path:** `s3://graywolf--data--lake/stock/gold/datasource=stock/dataset=company_dataset/`
 
-Joined business dataset combining price action with company fundamentals.
+Joined business dataset combining the Massive stock overview with Alpha Vantage company fundamentals (join on ticker).
+
+---
+
+## Data Schemas
+
+Full per-dataset specifications live in the notes (`notes/silver_*.md`); the key contracts are summarized here.
+
+### Silver — `daily_time_series` (Alpha Vantage)
+
+**Business key:** `(symbol, day_date)` — one price record per symbol per trading day. **Incremental strategy:** date-based watermark.
+
+| # | Column | Type | Description |
+|---|---|---|---|
+| 1 | `symbol` | STRING | Stock ticker (uppercase) |
+| 2 | `day_date` | DATE | Trading date (ISO 8601) |
+| 3 | `open` | DOUBLE | Opening price (> 0) |
+| 4 | `high` | DOUBLE | Intraday peak (`high >= low`) |
+| 5 | `low` | DOUBLE | Intraday trough |
+| 6 | `close` | DOUBLE | Closing price |
+| 7 | `volume` | LONG | Shares traded (>= 0) |
+| 8 | `daily_change` | DOUBLE | `close − open` |
+| 9 | `daily_change_percentage` | DOUBLE | % change open → close |
+| 10 | `market_movement` | STRING | `Bull` / `Bear` / `Neutral` |
+| 11 | `thirty_day_avg_open` | DOUBLE | Rolling 30-day average open |
+| 12 | `thirty_day_avg_close` | DOUBLE | Rolling 30-day average close |
+| 13 | `fifty_two_week_high` | DOUBLE | Rolling 365-day max high |
+| 14 | `fifty_two_week_low` | DOUBLE | Rolling 365-day min low |
+| 15 | `all_time_high` | DOUBLE | Historical max high |
+| 16 | `all_time_low` | DOUBLE | Historical min low |
+| 17 | `last_refreshed_date` | DATE | API last-refresh date |
+| 18 | `validation_status` | STRING | `VALID` / `INVALID` |
+| 19 | `validation_reason` | STRING | Quarantine reason (NULL if valid) |
+| 20 | `year` / `month` / `day` | INTEGER | Partition columns derived from `day_date` |
+| 21 | `processed_at` | TIMESTAMP | Processing timestamp (Asia/Kolkata) |
+| 22 | `previous_close` | DOUBLE | Prior session close (`lag` window) |
+| 23 | `previous_open` | DOUBLE | Prior session open |
+| 24 | `previous_high` | DOUBLE | Prior session high |
+| 25 | `previous_low` | DOUBLE | Prior session low |
+
+Full 19-step transform spec: [`notes/silver_daily_time_series.md`](notes/silver_daily_time_series.md).
+
+### Silver — `weekly_time_series` (Alpha Vantage)
+
+Business key `(symbol, week_date)`; weekly OHLCV plus derived `weekly_change`, `weekly_change_percentage`, `market_movement`, ISO `week_number`, `year`, `month`, `processed_at`. Spec: [`notes/silver_weekly_time_series.md`](notes/silver_weekly_time_series.md).
+
+### Silver — `company_overview` (Alpha Vantage)
+
+57 output columns (52 business fields + metadata): company identity (symbol, name, exchange, currency, sector, industry, country), valuation & shares (market cap, PE, EPS, dividend, 52-week range), profitability & growth margins, balance-sheet strength, and analyst targets. **Change detection:** SHA-256 hash of business columns. Spec: [`notes/silver_company_overview.md`](notes/silver_company_overview.md).
+
+### Silver — Massive datasets (`exchanges`, `stock_overview`, `aggregates`, `dividends`)
+
+Reference & market datasets from Polygon.io — the exchange registry (MIC codes, types, locales), the company overview that feeds the Gold join, 1-minute aggregates, and dividend history. Spec: [`notes/silver_exchanges.md`](notes/silver_exchanges.md).
+
+### Silver — `ticker_reference` (Finnhub)
+
+Cleaned symbol universe (symbol, description, type, currency, exchange/MIC) used to validate pipeline symbols. Spec: [`notes/silver_ticker_reference.md`](notes/silver_ticker_reference.md).
+
+### Gold — `company_dataset`
+
+Massive `stock_overview` ⋈ Alpha Vantage `company_overview` (join on ticker) → one enriched row per company, written as CSV under `stock/gold/datasource=stock/dataset=company_dataset/`.
+
+### YouTube (separate pipeline)
+
+* **JSON source (Silver):** `video_id`, `channel_id`, `channel_title`, `channel_description`, `publish_time`, `publish_at`, `kind`
+* **CSV source (Silver):** `video_id`, `trending_date`, `title`, `channel_title`, `category_id`, `publish_time`, `tags`, `views`, `likes`, `dislikes`, `comment_count`, `thumbnail_link`, `comments_disabled`, `ratings_disabled`, `video_error_or_removed`, `description`
 
 ---
 
@@ -692,6 +813,90 @@ Isolated execution methods:
 ## AWS Lambda Deployment
 
 Configured with [`template.yaml`](template.yaml) using AWS SAM.
+
+* **Pipeline Lambda** — packages the `src.stock_pipeline.app:lambda_handler` entry point; scheduled by EventBridge at `cron(0 14 ? * MON-FRI *)` (2:00 PM UTC, after the US market close).
+* **One-command deploy** — [`deploy.sh`](deploy.sh) wraps `sam build && sam deploy` with defaults from [`samconfig.toml`](samconfig.toml).
+* **Per-source ingestion Lambdas** — each source also ships its own SAM app: [`ingestion/alpha_vantage/`](src/stock_pipeline/ingestion/alpha_vantage/), [`ingestion/massive/`](src/stock_pipeline/ingestion/massive/), [`ingestion/finnhub/`](src/stock_pipeline/ingestion/finnhub/), [`ingestion/twelvedata/`](src/stock_pipeline/ingestion/twelvedata/).
+
+```bash
+sam build && sam deploy --guided    # pipeline Lambda
+```
+
+> **Note:** PySpark is heavy for Lambda (250 MB limit, slow cold starts). For sustained Spark ETL at scale, the recommended production pattern is **Lambda for ingestion + AWS Glue for Bronze → Silver** — see the [Roadmap](#roadmap).
+
+---
+
+## Twelve Data Ingestion (SAM Lambda)
+
+[`src/stock_pipeline/ingestion/twelvedata/`](src/stock_pipeline/ingestion/twelvedata/) is a standalone SAM Lambda that lands 1-minute bars into Bronze:
+
+| File | Role |
+|---|---|
+| `app.py` | `lambda_handler` — event contract below |
+| `client.py` | Twelve Data REST client |
+| `ingest.py` | Per-symbol ingestion loop |
+| `bronze.py` | S3 Bronze landing helpers |
+| `keys.py` | `TWELVEDATA_API_KEY` loader |
+| `config.py`, `template.yaml`, `samconfig.toml`, `requirements.txt` | Config & deployment |
+
+**Event contract** (all fields optional):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `stock_symbols` | `["IBM"]` | Symbols to ingest |
+| `full_load` | `false` | `true` → 5000 bars; `false` → one trading day |
+| `datasource` | `twelvedata` | Bronze `source=` partition value |
+| `run_id` | auto-generated | Bronze `run_id=` partition value |
+
+```bash
+cd src/stock_pipeline/ingestion/twelvedata
+sam build
+sam local invoke                     # defaults
+sam local invoke -e event.json       # custom event
+```
+
+---
+
+## YouTube Pipeline
+
+A sibling pipeline lives at the repo root (`youtube_pipeline/`, run from the `Data-Engineering/` directory):
+
+```bash
+python -m youtube_pipeline.app
+```
+
+Flow: YouTube Data API v3 search (`"AWS Data Engineering"`, latest 100 videos) → raw JSON to Bronze (`youtube/year=…/month=…/day=…/hour=…/`) → transform JSON (explode items) + trending-videos CSV → Silver CSV under `s3a://graywolf--data--lake/silver/youtube/source=youtube_api/`.
+
+Requires `YOUTUBE_API_KEY` and `S3_BUCKET_NAME` (no default) plus the AWS keys in a `.env` at the repo root.
+
+---
+
+## Testing
+
+```bash
+pytest tests/            # unit tests
+flake8 src/ tests/       # lint
+black --check src/       # format check
+```
+
+* `tests/test_stock_config.py` — configuration unit tests (3 tests).
+* **No-AWS smoke test** — exercise the Spark transform layer with synthetic Bronze data; recipe in [runbook §9](notes/running_pipeline_locally.md).
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `ValueError: No valid Alpha Vantage API keys found` | Key missing from `.env`, or `.env` not in the launch directory; restart after setting |
+| `ModuleNotFoundError: finnhub` / `massive` | `pip install -r requirements.txt` (pins `finnhub-python==2.4.29`, `massive==2.8.0`) |
+| Ivy/Maven download error on startup | First Spark run needs internet for `hadoop-aws`; check proxy, retry |
+| `Path does not exist: s3a://…silver/…` | Silver partition (`year=YYYY/month=MM`) not written yet — run the Silver steps first |
+| S3 403 / AccessDenied | Wrong AWS keys, or IAM lacks bucket read/write |
+| First run logs `mode=FULL_LOAD` | Normal — no watermark exists yet; later runs are incremental |
+| `SyntaxError: invalid non-printable character U+FEFF` | File saved as “UTF-8 with BOM” — re-save as plain UTF-8 |
+
+Full table with more context: [runbook §8](notes/running_pipeline_locally.md).
 
 ---
 
@@ -928,3 +1133,9 @@ By Day 90, this architecture will evolve into a **complete enterprise-grade data
 ## License
 
 Private project — part of the 90-Day Data Engineering Roadmap.
+
+---
+
+## Author
+
+**Jimmy Patel** — [GitHub](https://github.com/jimmyptl-jer)
